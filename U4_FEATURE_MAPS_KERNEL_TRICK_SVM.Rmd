@@ -1,0 +1,893 @@
+---
+title: "Inlämning 4"
+author: "Söderström J."
+date: "2024-03-14"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r,, libraries, message=FALSE, warning=FALSE, include=FALSE}
+rm(list = ls())
+# setwd("D:/ckurs/U4") 
+
+# Mon Jun  5 11:21:13 2023 ------------------------------
+
+# REQUIRED LIBS BLW
+
+# note to install required, keras & tensorflow flw this guide: https://tensorflow.rstudio.com/install/index.html 
+# install.packages(tidymodels)
+# devtools::install_github("andrie/deepviz") # https://github.com/andrie/deepviz
+
+# Wed Mar 13 13:23:46 2024 ------------------------------
+
+library(tensorflow, quietly = T) # nnet.
+library(keras, quietly = T) # nnet.
+
+# Fri Jun  9 11:10:00 2023 ------------------------------
+
+library(tidymodels, quietly = T) # supplementary functions.
+library(deepviz, quietly = T) # Viz nnet structure.
+library(discrim) # Viz confusion matrix.
+library(kernlab) # controlling expected result of kernel function.
+# Wed Mar 13 13:23:30 2024 ------------------------------
+
+```
+
+### Introduktion
+Denna uppgift är indelad i två deluppgifter. Inledningsvis hittade vi en linjär sepparation, mellan 2 grupper som seppareras av en icke-linjär gräns i 2d-planet. Vi åstadkom detta genom explicita- och implicita feature mappings, det sistnämnda med hjälp av kernel-tricket. Därefter klassificerade vi bilddata i MNSIT fashion data, från Zalando, med hjälp utav 1 kernel metod och 2 vanliga deep learning metoder; nämligen, Kernel-Support Vector machine, Artificial Neural Network och Convolutional Neural Network. Slutligen kommenterade vi metodernas prestanda och diskuterade slutsatser och begränsningar.
+
+### Om KPCA
+Den första deluppgiften kretsar kring Kernel Principalkomponent-Analys(KPCA). KPCA är en utbyggnad av vanlig PCA som medger modellering av icke-linjära mönster i datamaterial som traditionell PCA svårligen hanterar. 
+Syftet med denna deluppgift var att illustrera hur man kan applicera KPCA i syfte att fånga upp informativa principalkomponenter - de komponenter som fångar upp signifikant varians datamaterialet.
+
+### Data
+Datamaterialet bestod av simulerade ellipser vars form bestämdes av dess parametrar, 'a' och 'b'. Den första ellipsen hade parametrarna 'a = 1.0' och b = '0.5'. Den andra hade parametrarna 'a = 1.5' och b = '0.75'. Detta innebar en ellips som var bredare och längre än sin motsvarighet vilket illustreras i plot 1. Därefter roterades ellipserna i 2D planet, för att addera komplexitet och försvåra för linjära anfallssätt att hitta en bra beslutsgräns. Det slugiltiga datamaterialet bestod, alltså, av simulerade datapunkter uppmärkta med grupptillhörighet och deras respektive koordinater($X1, X2$) i 2D planet. 
+
+```{r, generate.data}
+
+# Wed Mar 13 13:29:33 2024 ------------------------------
+# GEN DATA PER ASSIGNMENT PROVIDED CODE
+# Wed Mar 13 13:29:55 2024 ------------------------------
+
+
+# Define a function to generate data with elliptical clusters
+DGP_ellipse <- function(N = 50, seed = 8312){
+ # Set a seed for reproducibility
+ set.seed(seed)
+ 
+ # Define a function to calculate y-values for elliptical shapes
+ oval_fun <- function(x, a = 1, b = 0.5){
+  b * sqrt(1 - (x/a)^2)}
+ 
+ # Generate x-values and corresponding y-values for the first ellipse
+ x11 = runif(N, -1, 1)
+ x12 = c(oval_fun(x11[1:(.5 * N)]), -oval_fun(x11[(.5 * N+1):N])) + rnorm(N, 0, 0.05)
+ 
+ # Combine x and y-values into a single matrix
+ X = cbind(x11, x12)
+ 
+ # Repeat the process for a second ellipse with different parameters
+ x21 = runif(N, -1.5, 1.5)
+ x22 = c(oval_fun(x21[1:(.5 * N)], a = 1.5, b = 0.75), -oval_fun(x21[(.5 * N + 1):N], a = 1.5, b = 0.75)) + rnorm(N, 0, 0.05)
+ 
+ # Combine the points from both ellipses
+ X = rbind(X, cbind(x21, x22))
+ 
+ # Apply a rotation transformation using eigenvectors of a predefined matrix
+ Q = eigen(matrix(c(1, -4, -4, 1), 2, 2))$vectors
+ X = X %*% Q
+ 
+ # Assign labels to the data points
+ y = c(rep(1, N), rep(0, N))
+ 
+ # Combine labels with the data points
+ d = cbind(y, X)
+ 
+ # Return the dataset
+ return(d)
+}
+
+# Generate the dataset
+d = DGP_ellipse()
+```
+
+
+## Plot 1: Datat består av två grupper som inte är linjärt sepparabla i 2D-planet.
+
+```{r, plot.generated.data, fig.height=3, fig.width=6}
+
+# Extract features and labels from the generated dataset
+X = d[,-1]
+y = d[,1]
+
+# Visualize the original data points with different colors for each cluster
+par(mar = c(4, 4, 0.5, 0.5))
+p1 <- plot(X, pch=20, col = y+2, xlab = "X1", ylab = "X2", asp = 1, cex = 3)
+
+```
+
+### Metod
+
+Först valdes en lämplig kernelfunktion för att omvandla datamaterialet till ett högre dimensionellt utrymme, augmented feature space, där datapunkter som inte är linjärt separerbara i det ursprungliga 2D utrymmet kunde tänkas bli separerbara. Kernelfunktionen, betecknas \(\kappa_{\varphi}\), underlättade denna omvandling, indirekt, genom att beräkna de inre produkterna av datapunkter i det nya utrymmet. I detta fall används en polynomkernelfunktion definierad som: \[
+\kappa_{\phi}(x_i, x_j) = (x_i^Tx_j + c)^d
+\]
+där \(x_i\) och \(x_j\) är observationsvektorer, \(d\) är polynomets grad, och \(c\) är en konstant som möjliggör justering av kernelfunktionens flexibilitet.
+
+Därefter konstruerades en Gram-matris, \(K\), genom att beräkna de ömsesidiga kernelfunktionerna mellan observationer; \(\kappa_{\phi}(x_i, x_j)\), och resultatet sparas i en \(n \times n\) matris \(K\), Gram-matrisen: \[
+K = \{\kappa_{\phi}(x_i, x_j)\}
+\]
+För att justera för eventuella snedvridningar centrerades Gram-matrisen via subtraktion av radernas medelvärden och kolumnernas medelvärden från varje element i matrisen - följt av addition av det totala medelvärdet till varje element: \[
+K^* = K - CK - KC + CKC
+\]
+där \(C\) är en \(n \times n\) matris där alla element är lika med \(1/n\). \(n\) är antalet observationer. Den centrerade Gram-matrisen, \(K^*\), genomgick sedan en egenvärdesdekomponering för att identifiera principalkomponenterna. \[
+K^* = E\Lambda E^T
+\]
+där \(\Lambda\) är en diagonal matris med egenvärden och \(E\) är en matris med motsvarande egenvektorer.
+
+Dessa komponenter användes därefter för att bestämma huvudkomponenterna, de mest informativa principalkomponenterna - som åstadkommer en indelning motsvarande en linjär gräns i augmented feature space. Slutligen extraherades den mest informativa komponenten genom att välja det tredje egenvärdet och dess motsvarande egenvektor - baserat på att vi redan vet att denna komponent ger en bra indelning. \[
+\text{PC} = \sqrt{\lambda_3}e_3
+\]
+där \((\lambda_3, e_3)\) är det tredje egenvärdesparet från den centraliserade Gram-matrisen \(K^*\).
+
+```{r, include=F, find.sepparation.aug.feature.space}
+
+# Thu Mar 14 11:54:03 2024 ------------------------------
+# EXPECTED RESULTS USING AUGMENTED FEATURE SPACE MAPPINGS
+# Thu Mar 14 11:54:10 2024 ------------------------------
+
+
+# This code is an approach to enhance class separability by leveraging non-linear feature transformations and principal component analysis, culminating in a visualization to assess the separability of the data in the transformed space.
+ 
+# 1. Non-linear Transformation: Applies specific non-linear transformations to the original features (`X`). Three new features (`h1`, `h2`, `h3`) are created by squaring the first feature, multiplying the first and second features (scaled by √2), and squaring the second feature, respectively. These transformations are designed to map the data into a new feature space where the classes may become linearly separable.
+ 
+# 2. Data Matrix Augmentation: The transformed features are combined into a new data matrix `H`, representing the data in this newly transformed feature space.
+
+# 3. Mean Centering: Calculates the mean of the transformed data matrix and centers the data by subtracting this mean. This step is essential for many dimensionality reduction techniques, as it ensures that the data has a mean of zero, which is a prerequisite for calculating covariance.
+
+# 4. Covariance Calculation: Computes the covariance matrix `S` of the centered data. The covariance matrix captures the variance and covariance between the different features in the transformed space.
+
+# Thu Mar 14 12:00:45 2024 ------------------------------
+
+# 5. Eigen Decomposition: Eigen decomposition on the covariance matrix to find its eigenvalues and eigenvectors. This step identifies the directions (principal components) that maximize the variance of the data in the transformed space.
+
+# Thu Mar 14 12:00:39 2024 ------------------------------
+
+# 6. Principal Component Projection: The centered data is projected onto the eigenvectors, resulting in a set of principal components `z`. This transformation highlights the most informative aspects of the data in terms of variance.
+
+# 7. Visualization: Finally, the third principal component (`z[,3]`) is visualized in a plot, demonstrating how this component can separate the two groups.
+
+#---------------------------------#
+#--- non-linear transformation ---#
+#---------------------------------#
+
+# Apply non-linear transformations to the original features
+h1 <- X[, 1]^2
+h2 <- sqrt(2) * X[, 1] * X[, 2]
+h3 <- X[, 2]^2
+
+# Augment the transformed features into a new data matrix
+H = cbind(h1, h2, h3)
+
+# Calculate the number of observations
+n = dim(H)[1]
+
+# Create a matrix for mean centering
+M_h = matrix(rep(colMeans(H), n), byrow = T, ncol = 3)
+
+# Center the augmented data matrix
+HH = H - M_h
+
+# Compute the covariance matrix of the centered data
+S = t(HH) %*% HH
+
+# Perform eigen decomposition on the covariance matrix
+P = eigen(S)$vectors
+
+# Project the centered data onto the eigenvectors to obtain principal components
+z = HH %*% P
+
+
+# The 3rd column of z is informative
+# plot(z[,3], rep(0,n), pch=20, col = y+2, xlab = "PC3", ylab = "", asp = 1, cex = 3)
+
+```
+
+
+## Plot 2: Jämförelse mellan explicit och implicit metod
+
+```{r, fig.height=3, fig.width=7, find.sepapration.using.kernel.function}
+
+# Thu Mar 14 11:54:38 2024 ------------------------------
+# USING KERNEL FUNCTION
+# Thu Mar 14 11:54:40 2024 ------------------------------
+
+
+# This implements the kernel principal component analysis (KPCA) using a polynomial kernel function, in contrast to the direct feature space transformation and PCA in the previous approach. In comparison to the direct transformation and PCA, this kernel PCA approach provides a more flexible and powerful method to handle non-linear separability by leveraging kernel functions to project data into a higher-dimensional space, where linear methods like PCA can be effectively applied to identify patterns and structures not visible in the original space.
+
+# 1. Polynomial Kernel Function: defines a polynomial kernel function that implicitly maps the original data into a higher-dimensional space without explicitly computing the coordinates in that space. Computes the inner products of the data points in the transformed space, parameterized by degree `d` and offset `c`.
+
+# 2. Gram Matrix Calculation: The Gram matrix `K`, representS the pairwise inner products between all data points in the feature space induced by the polynomial kernel. This step is analogous to forming a new data matrix `H` in the previous approach, but instead of explicitly transforming features, it works in the kernel-induced feature space.
+ 
+# 3. Centralization of the Gram Matrix: The code centralizes the Gram matrix `K` to adjust the kernel matrix similarly to how the transformed data matrix was centered in the previous method. This step ensures the data has zero mean in the feature space.
+
+# 4. Eigen Decomposition: Eigen decomposition is performed on the centralized Gram matrix to find its principal components. This process is akin to decomposing the covariance matrix of the centered data in the earlier approach but applied in the kernel-induced feature space.
+
+# 5. Principal Component Calculation: The third principal component is calculated using the third eigenvalue and eigenvector from the eigen decomposition, providing insights into the data's structure in the high-dimensional space.
+
+# 6. Visualization.
+
+
+# Mon Mar 11 15:11:18 2024 ------------------------------
+# FOLLOWING STEPS FROM ASSIGNMENT
+# Mon Mar 11 15:11:47 2024 ------------------------------
+
+# 1. Polynomial Kernel Function
+# Define the polynomial kernel function with specified parameters
+polynomial_kernel <- function(X, d = 2, c = 0) {
+ # Compute the kernel matrix for input matrix X
+ # X: n by p matrix where n is the number of observations and p is the number of features
+ # d: degree of the polynomial (default set to 2)
+ # c: offset in the polynomial kernel (set to 0)
+ (X %*% t(X) + c)^d
+}
+
+
+# 2. Calculate the Gram Matrix K
+K <- polynomial_kernel(X, d = 2, c = 0)
+
+
+# 3. Centralize the Gram Matrix
+n <- nrow(K)
+C <- matrix(1/n, n, n)
+K_star <- K - (C %*% K) - (K %*% C) + (C %*% K %*% C)
+
+
+# 4. Eigen Decomposition on Centralized Gram Matrix
+eigen_result <- eigen(K_star)
+lambda <- eigen_result$values
+E <- eigen_result$vectors
+
+# 5. Calculate the Principal Component
+lambda3 <- lambda[3]
+e3 <- E[, 3]
+PC <- sqrt(lambda3) * e3  # This is a representation in the high-dimensional space
+
+
+# Mon Mar 11 15:22:33 2024 ------------------------------
+# Mon Mar 11 15:22:33 2024 ------------------------------
+
+
+# Visualization
+par(mfrow = c(2, 1), mar = c(3, 2, 1, 0.5))
+
+plot(z[,3], rep(0,n), pch=20, col = y+2, xlab = "Z2", ylab = "", main = "Grouping on 3rd PC using aug. feature mappings(proj. in 2d)",  asp = 1, cex = 3)
+
+# Fri Mar 15 11:34:47 2024 ------------------------------
+
+
+plot(PC, rep(0, 100), col = y+2, pch=20, xlab = "PC3", ylab = "",  
+     main = "Grouping on 3rd PC using analog kernel function(proj. in 2d)", asp = 1, cex = 3)
+
+
+# Mon Mar 11 16:30:06 2024 ------------------------------
+#table(round(PC, 9) == round(z[,3], 9))
+
+
+
+# Mon Mar 11 15:22:29 2024 ------------------------------
+# Mon Mar 11 15:22:30 2024 ------------------------------
+
+
+# kpc <- kpca(X, kernel = "polydot", features = 3, kpar = list(degree = 2, scale = 1, offset = 0))
+# zzz = kpc@pcv[,3]
+# plot(zzz, rep(0, n), pch=20, col = y+2, xlab = "PC3", ylab = "", 
+#      main = "Expected result using kernlab's function", asp = 1, cex = 3, xlim = c(-1, 2))
+# 
+
+
+# Mon Mar 11 15:46:11 2024 ------------------------------
+# TASK 2 BELOW
+# Mon Mar 11 15:46:12 2024 ------------------------------
+
+```
+
+### Resultat
+
+Från plot 2 kan vi dra flera slutsatser, datamaterialet blir linjärt sepparabelt via feature mappings såväl som kernel-tricket. Med hjälp utav å ena sida feature mappings å andra KPCA fångade vi upp de kritiska delarna av datamaterialets struktur. Denna information fanns i den 3:e principalkomponenten som vi hittade genom egenvärdesdekomponering av Gram-matrisen.
+
+### Diskussion
+
+Denna deluppgift påvisar användbarheten av kernel-tricket i allmänhet, KPCA i synnerhet, då vi försöker modellera icke-linjära samband. Vi använde oss utav en kernelfunktion för att implicit genomföra en feature mapping till en högre dimension där grupperna i datamaterialet blev linjärt sepparabla. Dock ska nämnas att kernel-metoder är som att trimma motorn i modellen, vilket ökar risken för överanpassning. Detta försöker vi ofta motverka med någon form av loss-funktion, risken kvarstår. De är minnesbaserade vilket innebär att beräkningstiden blir längre och dyrare när vi vill använda modellen eftersom vi behöver hålla hela datamaterialet i minnet. Detta kan bli ogörbart vid verkligt högdimensionella datamaterial. Det finns inga gratisluncher - kernelmetoder gör modeller lättare att träna men dyrare att använda! Ett sätt att avväga fördelar och nackdelar med kernelmetoder är att nyttja sparse kernel methods som exempelvis Kernel Support Vector Machines. Mer om detta i deluppgift 2.
+
+```{r, empty.env.load.t2.data}
+rm(list = ls())
+load("fashion_data.RData")
+
+```
+
+### Om bildklassificering med hjälp utav deep learning
+
+I deluppgift två tränade vi tre deep learning modeller för bildklassificering.
+
+### Data
+
+Den som påbörjar sin resa inom djupinlärning kommer sannolikt att börja med MNIST eller CIFAR 10 som första problemuppsättningar. Fashion-MNIST består av produktbilder från Zalando om ett träningsset med 60 000 exempel och ett testset med 10 000 exempel. Varje exempel är en $28\times28$ gråskalebild, se plot 3, klassificerad till 1 av 10 olika klasser. Vårt träningsdata drogs slumpmässigt från det ursprungliga träningssetet. Baserat på detta tränade vi tre deep learning modeller för att klassificera bilderna, till någon utav 1-10. Slutligen jämförde vi modellernas prestanda.
+
+## Plot 3: Exempel MNIST 28x28 gråskalebilder.
+```{r, viz.example, fig.height=1.5}
+
+# show images
+colors = c('white','black'); cus_col <- colorRampPalette(colors=colors)
+X = data[,-1]
+
+par(mfrow = c(1,5), mar = c(1, 1, 1, 1))
+for(i in 1:5){
+ z = matrix(X[i,784:1], 28, 28, byrow=T)[, 28:1]
+ image(t(z), col=cus_col(256))
+}
+
+```
+
+
+```{r, formatting, include=FALSE}
+
+# Mon Mar 11 16:04:27 2024 ------------------------------
+# FORMAT; 
+# Tue Mar 12 12:46:15 2024 ------------------------------
+
+data <- as.data.frame(data)
+data$label <- as.factor(data$label)
+
+# Thu Mar 14 16:30:26 2024 ------------------------------
+
+```
+
+
+
+```{r, split.data, include=FALSE}
+
+# Wed Mar 13 13:48:16 2024 ------------------------------
+# SPLIT INTO TRAIN/TEST AND FOLD
+# Wed Mar 13 13:48:28 2024 ------------------------------
+
+# re-produce
+set.seed(777) 
+# train/test split.
+df <- initial_split(data, prop = 4/5) # split using 3/4 of data for trainig and eval on rest; NOTE STRATA ON RESPONSE.
+df_train <- training(df) # assign training data to own data frame
+df_test <- testing(df) # assign test data to own data frame
+
+# Tue Mar 12 12:46:20 2024 ------------------------------
+```
+
+```{r, fold.for.svm, include=FALSE}
+set.seed(333)
+# prepare cross-validation, 6-folds.
+df_folds <- vfold_cv(df_train, v = 5) 
+# regarding repeats, if the baseline value of σ is impractically large, 
+# the diminishing returns on replication may still be worth the extra 
+# computational costs. 
+df_folds
+
+```
+
+
+### Metod
+
+De tre modellerna vi använde var Kernel Support Vector Machine(KSVM), Artificiellt Neuralt Nätverk(ANN), och Konvolutionellt Neuralt Nätverk(CNN).
+
+En vanlig SVM syftar, som bekant, till att hitta den bästa avgränsande $linjära$ gränsen, eller hyperplanet, som skiljer datapunkter i olika klasser. **KSVM** utnyttjar kerneltricket vilket utvidgar SVM till att hantera icke-linjära indelningar. Som vi såg i deluppgift 1, transformeras datat till en högre dimension där det kan vara möjligt att sepparera olika klasser med ett linjärt plan. Till skillnad från första deluppgiften där vi använde polynomial kernel så anväde vi här Radial Basis Function(RBF): \[ K(x, x') = \exp\left(-\frac{||x - x'||^2}{2\sigma^2}\right) \]
+där \(x\) och \(x'\) är datapunkter och \(\sigma\) är en parameter som bestämmer det sepparerande planets bredd. Genom att välja ett högre sigma uppnår vi färre felklassificeringar och färre support vektorer, datapunkter som ligger på det sepparerande planet, detta medför dock en ökad risk för overfitting. Vi genomförde parametersökning, och identifierade att \(\sigma = 1\) och en regularisering, samma tänk som ridge-regression, om 2.67 var optimala värden för den range vi sökte över.  
+
+I syfte att spara tid genomfördes dimensionsreducering via PCA och tillpassningen av kernel-svm på de 11 första principalkomponentera. 
+
+```{r, model.rec, include=FALSE}
+
+# Tue Mar 12 12:21:11 2024 ------------------------------
+# CREATE RECIPE FOR TIDY SVM
+# Tue Mar 12 16:05:28 2024 ------------------------------
+
+# Define recipe, formula and using dimensionality reduction; NOTE WILL PERFORM INFERENCE USING FIRST 11 PC'S
+svm_rec <- recipe(label ~., data = df_train) %>% # formula
+   step_pca(all_predictors(), num_comp = 11)  # CREATE PC'S FROM ALL PREDICTORS; SELECT FIRST 11.
+
+
+# quick check-up!
+# svm_rec %>% prep() %>% juice()
+ 
+```
+
+
+```{r, model.spec, include=FALSE}
+
+# Sun May 14 01:19:45 2023 ------------------------------
+# SPECIFY MODEL TYPE AND PARAMETERS
+# Tue Mar 12 16:05:19 2024 ------------------------------
+
+# From tuning; Time difference of 58.97712 mins; gamma = 1.0, cost = 2.67; is best for my selected ranges; NOTE RANGES ARE SPECIFIED UNDER 'SET GRID' BLW.
+# Can find better with more time expend; but so, so, lazy... :/
+# (default gamma = 1 / 784.)
+
+svm_mdl <- svm_rbf(
+ mode = "classification",
+ engine = "kernlab",
+ cost = 2.67,
+ rbf_sigma = 1.0)
+
+
+# Sun May 14 01:46:25 2023 ------------------------------
+#  SET GRID
+# Wed Mar 13 13:54:46 2024 ------------------------------
+
+# Lower C: More regularization, allowing more misclassifications but aims for a wider margin. Ideal for when trying to avoid overfitting!
+# Higher C: Less regularization, aiming for fewer misclassifications even if it means a narrower margin. 
+# Use this when focus is getting as many examples right as possible, at the risk of overfitting. 
+
+# Finding the Optimal C: This typically involves a grid search or a similar optimization process where you try out a range of C values 
+# (often on a logarithmic scale, e.g., 0.001, 0.01, 0.1, 1, 10, 100) and choose the one that performs best on a cross-validation set.
+
+# https://datascience.stackexchange.com/questions/5717/where-is-the-cost-parameter-c-in-the-rbf-kernel-in-svm; se bild 2! Effekt av sigma.
+
+# Define parameter ranges
+
+# svm_grid <- grid_regular(cost(range = c(0, 5)),
+# rbf_sigma(range = c(1e-03, 1e+02)))
+
+
+# Tue Mar 12 12:36:02 2024 ------------------------------
+# SPECIFY CONTROL; SAVE WORKFLOW FALSE SINCE LARGE DATASET
+# Wed Mar 13 13:59:47 2024 ------------------------------
+
+mdl_control <- control_grid(save_pred = TRUE, 
+                            save_workflow = FALSE)
+
+# Tue Mar 12 12:36:44 2024 ------------------------------
+# SET METRICS; STANDARD METRICS, APART FROM MN_LOG_LOSS
+# DESC MN_LOG_LOSS
+# Wed Mar 13 14:03:02 2024 ------------------------------
+
+mdl_metrics_class <- metric_set(accuracy, sens, spec, mn_log_loss)
+
+
+# Sun May 14 01:23:30 2023 ------------------------------
+# DEFINE WORKFLOW
+# Wed Mar 13 14:19:23 2024 ------------------------------
+
+# define workflow tying together model statement and preproc recipe
+svm_wf <- workflow() %>%
+ add_model(svm_mdl) %>%
+ add_recipe(svm_rec)
+
+```
+
+
+```{r, fit.svm.model, include=FALSE}
+
+# Sun May 14 01:25:00 2023 ------------------------------
+# TUNE ALREADY DONE; USING FIT_RESAMPLES TO FIT MODEL
+# Tue Mar 12 12:37:40 2024 ------------------------------
+
+# Mutiple cores, smoke 'em if you(still) got em.
+doParallel::registerDoParallel()
+
+# Fri May 12 15:25:21 2023 ------------------------------
+# Tuning is the process of choosing the most optimal hyperparameters, 
+# the goal being to optimize the predictive performance. 
+# A hyperparameter tuning  grid is a table of values, that are specified. 
+# During the tuning process, a separate model is trained for each combination 
+# of  hyperparameters in the tuning grid. The performance is evaluated, using 
+# cross-validation. The hyperparameter values that result in the model with the
+# best.  
+# performance are then chosen as the final hyperparameters.
+
+set.seed(81)
+
+# time will depend on n parameters to tune, size of data, e.tc
+# Is there a way to determine on beforehand how long time it will take?
+#start <- Sys.time()
+
+fit_svm <- fit_resamples(
+ svm_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+#stop <- Sys.time()
+
+#stop - start
+
+# Time difference of 17.57926 mins
+
+# we won't need paralell moving forward.
+doParallel::stopImplicitCluster()
+
+```
+
+
+
+
+```{r, assess.results, include=FALSE}
+
+# Sun May 14 01:29:00 2023 ------------------------------
+# RESULTS
+# Wed Mar 13 14:28:55 2024 ------------------------------
+
+
+# find best model parameters from tuning process using metric; accuracy
+svm_best <- fit_svm %>% show_best("accuracy") %>%
+   head(1) 
+
+# Sun May 14 01:30:20 2023 ------------------------------
+
+# last_fit() emulates the process where, after determining the best model, the final fit on 
+# the entire training set is needed and is then evaluated on the initially held-out
+# test set. Note that this is the first time the models get to see the held-out data set.
+
+start <- Sys.time()
+
+svm_fin <- svm_wf %>%
+ finalize_workflow(svm_best) %>%
+ last_fit(df)
+
+stop <- Sys.time()
+
+#stop - start
+# Time difference of 5.86357 mins
+# see final metrics, eval on test set
+res <- svm_fin %>% collect_predictions()
+
+# plot confusionmatrix
+#autoplot(conf_mat(table(res$label, res$.pred_class)), type = "heatmap") +
+# labs(subtitle = "SVM")
+
+```
+
+
+
+```{r, include=FALSE}
+
+# good enough!
+# accuracy, save for later.
+acc_svm <- mean(res$.pred_class == res$label)
+
+
+
+```
+
+
+```{r, fit.baseline.model, include=FALSE, warning=FALSE, message=FALSE}
+
+# Thu Mar 14 17:52:05 2024 ------------------------------
+# TRAIN BASELINE MODEL FOR COMPARISON; score to beat, NAIVE BAYES CLASSIFIER.
+# Thu Mar 14 17:52:08 2024 ------------------------------
+
+baseline <- naive_Bayes(
+  mode = "classification",
+  engine = "klaR")
+
+# Thu Mar 14 17:54:22 2024 ------------------------------
+
+baseline_wf <- workflow() %>%
+ add_model(baseline) %>%
+ add_recipe(svm_rec)
+
+# Thu Mar 14 17:54:27 2024 ------------------------------
+
+
+# Mutiple cores, smoke 'em if you(still) got em.
+doParallel::registerDoParallel()
+
+set.seed(81)
+
+fit_baseline <- fit_resamples(
+ baseline_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+doParallel::stopImplicitCluster()
+
+# Thu Mar 14 17:57:21 2024 ------------------------------
+
+baseline_best <- fit_baseline %>% show_best("accuracy") %>%
+   head(1) 
+
+# Thu Mar 14 17:57:38 2024 ------------------------------
+
+baseline_fin <- baseline_wf %>%
+ finalize_workflow(svm_best) %>%
+ last_fit(df)
+
+# Thu Mar 14 18:01:18 2024 ------------------------------
+
+res_baseline <- baseline_fin %>% collect_predictions()
+
+# Thu Mar 14 18:00:45 2024 ------------------------------
+
+# score to beat.
+
+# accuracy
+acc_baseline <- mean(res_baseline$.pred_class == res_baseline$label)
+
+```
+
+
+```{r, xtrain.ytrain, include=FALSE}
+
+# Tue Mar 12 13:28:23 2024 ------------------------------
+# ANN BLW
+# Tue Mar 12 13:28:30 2024 ------------------------------
+
+set.seed(333)
+
+# fix data train and test;
+x_train <- as.matrix(df_train[, -1] / 255)  # Exclude the first column for features and normalize
+y_train <- df_train[, 1] # The first column is the label
+
+
+# Wed Mar 13 15:30:23 2024 ------------------------------
+
+x_test <- as.matrix(df_test[, -1] / 255) # Exclude the first column for features and normalize
+y_test <- df_test[, 1] # The first column is the label
+
+# Convert labels to categorical; one hot encoding.
+y_train <- to_categorical(y_train) # 10 classes for Fashion MNIST
+y_test <- to_categorical(y_test)
+
+
+```
+
+\ 
+**ANN** är inspirerade av det mänskliga nervsystemet och efterliknar hur neuroner kommunicerar med varandra. Ett ANN består av noder, eller artificiella "neuroner," som är organiserade i lager: indata-, dolda och utdatalager. Dessa noder är kopplade till varandra genom vikter, som representerar styrkan i kopplingarna. När ett ANN tränas, tar det emot indata genom indatalagret, bearbetar informationen genom ett eller flera dolda lager med hjälp av aktiveringsfunktioner, för att bestämma signalens styrka, och producerar sedan ett utdata genom utdatalagret. Inlärningsprocessen innebär justering av vikterna via bakåtpropagering - en metod där felet mellan modellens prediktioner och faktiska värden används för att justera nätverkets vikter, vanligtvis från utdatalagret tillbaka genom de dolda lagren - alltså baklänges genom nätverket. Detta görs med hjälp av en optimeringsalgoritm, i vårt fall AdaMax^[Allaire J, Tang Y (2024). _tensorflow: R Interface to 'TensorFlow'_. R package version 2.15.0] och categorical crossentropy som lossfunktion^[Allaire J, Tang Y (2024). _tensorflow: R Interface to 'TensorFlow'_. R package version 2.15.0]
+
+Aktiveringsfunktionen ReLU användes för de dolda lagren: \[ f(x) = \max(0, x) \]. Genom att ha en tröskel vid noll medger ReLU att "aktivera" neuroner endast när det finns positiva indata. Detta leder i teori till att nätverket blir mer effektivt, då endast en del av neuronerna aktiveras vid en given tidpunkt. 
+
+Softmaxfunktionen används för outputlagret. Softmaxfunktionen definieras som:
+
+\[ \text{Softmax}(x_i) = \frac{e^{x_i}}{\sum_{j=1}^{N} e^{x_j}} \]
+
+där:
+- \(x_i\) är det i:te elementet i utdatavektorn \(x\),
+- \(e^{x_i}\) representerar den exponentiella funktionen av \(x_i\),
+- \(N\) är antalet element i vektorn \(x\),
+- \(\sum_{j=1}^{N} e^{x_j}\) är summan av exponenterna för alla element i vektorn, vilket fungerar som en normaliseringsterm. Detta medför att varje \(x_i\) omvandlas till en sannolikhet genom att ta dess exponent, och sedan normalisera så att summan av alla sannolikheter blir 1. 
+
+Nedan följer en översikt av nätverket som har 3 dolda lager med 128, 24 och 24 noder respektive, samt ett output-lager om 10 noder - eftersom vi har 10 klasser i vår responsvariabel. Siffran under param anger nätets learnable parameters(justerbara vikter). Dessa kan beräknas för hand genom att omvandla varje bild till en långvektor; som blir \[ 28*28 = 784\] lång. Därefter notera antalet noder i varje lager i nätverket. 
+
+För varje anslutning mellan två på varandra följande lager, multiplicerar vi antalet noder i det föregående lagret med antalet noder i det efterföljande lagret för att bestämma antalet vikter mellan dem. Vi lägger sedan till en extra parameter för varje nod i alla lager efter indatalagret, som representerar biasvärdet för varje nod. Det totala antalet justerbara parametrar i nätverket är summan av alla dessa vikter och biaser från varje lager.\[ \text{Totala antalet parametrar} = \sum_{i=1}^{L-1} ((\text{Antal noder i lager } i + 1) \times \text{Antal noder i lager } (i+1)) \]
+Där \( L \) är det totala antalet lager i nätverket.
+
+Alltså, i det första lagret, indata-lagret har vi; \[((784 + 1) \times 128 = 100480. \] Nästa lager; \[((128 +1) \times 24 = 3096 \] et.c.
+
+
+
+## Översikt ANN
+
+```{r, deinfe.architecture.ann, warnings = FALSE, message=FALSE, include=FALSE}
+
+# Wed Mar 13 15:17:40 2024 ------------------------------
+# DEFINE MODEL ARCHITECTURE
+# Wed Mar 13 15:17:47 2024 ------------------------------
+
+# Initialize a sequential model
+model0 <- keras_model_sequential() %>%
+  # Add a dense layer with 128 units and ReLU activation. This is the input layer, expecting input of shape 784 
+  # (e.g., a flattened 28x28 image).
+  layer_dense(units = 128, activation = 'relu', input_shape = c(784)) %>% 
+  # Add a second dense layer with 24 units and ReLU activation. This serves as a hidden layer for feature extraction.
+  layer_dense(units = 24, activation = 'relu') %>%
+  # Add a third dense layer with 24 units and ReLU activation, adding depth to the model's learning capability.
+  layer_dense(units = 24, activation = 'relu') %>%
+  # Add the output layer with 10 units and softmax activation, suitable for multi-class classification (10 classes for Fashion MNIST).
+  layer_dense(units = 10, activation = 'softmax')
+
+# Compile the model with the Adamax optimizer, categorical crossentropy as the loss function, and track accuracy as the metric.
+model0 %>% compile(
+  optimizer = optimizer_adamax(),
+  loss = 'categorical_crossentropy',
+  metrics = 'accuracy')
+
+# Visualize the model architecture to better understand the layer configurations and parameters.
+#plot_model(model0)
+
+```
+
+```{r}
+# arkitektur
+summary(model0)
+```
+
+
+```{r, train.ann, message=FALSE, include=FALSE}
+
+# Wed Mar 13 15:17:53 2024 ------------------------------
+#
+# Wed Mar 13 15:17:56 2024 ------------------------------
+
+set.seed(777)
+
+# Training the model - example without using cv_folds for simplicity
+history0 <- model0 %>% fit(
+   x_train, y_train,
+   epochs = 20,
+   batch_size = 128,
+   validation_split = 0.2 # Alternatively, use your folds for more complex CV
+   )
+
+
+```
+
+```{r, plot.ann.history, include=FALSE}
+# SHOW ARCHITECTURE
+# plot(history0)
+
+```
+
+
+```{r, include=FALSE, collect.metrics.ann}
+# Evaluate on test data
+acc_ann <- model0 %>% evaluate(x_test, y_test)
+# good enough!
+acc_ann <- as.numeric(acc_ann[2])
+```
+
+
+
+
+```{r, fix.data.for.cnn, include=FALSE}
+
+# Tue Mar 12 19:05:56 2024 ------------------------------
+# CNN BELOW
+# Tue Mar 12 19:06:04 2024 ------------------------------
+
+
+# en tanke;
+# https://stackoverflow.com/questions/43151775/how-to-have-parallel-convolutional-layers-in-keras
+
+# Assuming x_train and x_test were previously flattened to have shape [number of samples, 784]
+# Reshape them to [number of samples, 28, 28, 1] - which is the format expected by the CNN
+
+set.seed(777)
+
+# For x_train
+x_train_reshaped <- array(x_train, dim = c(nrow(x_train), 28, 28, 1))
+
+# For x_test
+x_test_reshaped <- array(x_test, dim = c(nrow(x_test), 28, 28, 1))
+
+
+```
+
+\
+**CNN** är en specialiserad typ av ANN designade för att bearbeta data med gridstruktur, som $28\times28$ bilder på kläder. CNN är som ett ANN men med tillägg, konvolutionslager, där varje neuron tar emot indata från en liten, lokalt begränsad del av bilden – ett lokalt receptivt fält. Därefter appliceras filter för att skapa en feature map, som representerar specifika aspekter som kanter eller texturer.
+
+Efter konvolutionslagret följer ofta ett poolinglager som reducerar dimensionerna på dessa feature maps genom att sammanfatta deras innehåll, vilket inte bara minskar beräkningsbelastningen utan också gör nätverket mindre känsligt för var i bilden olika aspekter uppträder. CNN är vanligtvis djupare än ANN, vilket möjliggör att komplexa mönster kan byggas upp från enklare delar. 
+
+Beräkningen av justerbara vikter är snarlik ANN, med skillnaden att vi behöver tänka i grids. Om vi använder ett filter av storlek $3\times3$ i det första konvolutionslagret av ett CNN och processar en gråskalebild - endast en kanal, får varje filter $3*3=9$ vikter. Detta gäller eftersom det är en gråskalebild, en RGB-bild har tre kanaler (röd, grön och blå). Varje filter har, precis som i ANN, en biasterm. För ett $3\times3$ filter har vi totalt 
+$3*3+1=10$ parametrar. Om vi sedan har 32 sådana filter i lagret, multiplicerar vi antalet parametrar per filter med antalet filter för att få det totala antalet parametrar i lagret. För första lagret, $(3*3+1)*32=320$.
+
+Vårt CNN innehöll flera konvolutionslager med ReLU-aktivering följt av max-pooling lager,\[ \text{Max-pooling}(x) = \max_{\substack{i \in \text{poolingområde}}} x_i. \] Därefter 2 dolda lager och ett utlager(som beskrivits i samband med ANN).
+
+## Översikt CNN
+```{r, define.cnn.architecture, include=FALSE}
+
+# Define the CNN architecture
+model <- keras_model_sequential() %>%
+   layer_conv_2d(filters = 32, kernel_size = c(3, 3), 
+# Consequence: smaller kernel extract feature from smaller area of pic but more prone to overfit.
+# Apply scientific method here(aka. think + mess around and find out(what it does) + repeat).
+# Filter means every single processing has 16 different kernels, each 3 by 3 per above.
+# each of these filters are performing a different task, for instance one may blur the picture, the next contrast, the next trying to detect darkness, e.tc. I.e we have 16 filters applied to 1 image outputting 16 objects, feature mappings, per picture from this layer alone.
+                 activation = 'relu', 
+                 # replaces all negative pixel values in the feature map with zero, 
+                 # f(x) = max(0, x), like so.       
+                 input_shape = c(28, 28, 1)) %>% # define input shape as expected. 28x28 image
+   layer_max_pooling_2d(pool_size = c(2, 2)) %>% # use max pooling.
+   layer_conv_2d(filters = 20, kernel_size = c(3, 3), padding = 'same', activation = 'relu') %>%
+   layer_max_pooling_2d(pool_size = c(2, 2), strides = c(1, 1), padding = 'same') %>% 
+   layer_flatten() %>%  # Flatten convolutional output and feed into dense layer
+   layer_dense(units = 128, activation = 'relu') %>% # means we turn an array into a line, imagine taking the 1st row then the 2nd and so on and laying it down like railroad tracks. Essentially going from a 2d matrix to a row vector. So that we can easily pass our input into the conventional part of this net.
+   layer_dense(units = 100, activation = 'relu') %>%
+   layer_dense(units = 10, activation = 'softmax')  # Output layer
+# Outputs from dense layer are projected onto 10 unit output 
+# layer using softmax activation function.
+
+
+# Compile the model
+model %>% compile(
+   optimizer = optimizer_adamax(), #
+   loss = 'categorical_crossentropy',  # Use 'binary_crossentropy' for binary tasks
+   metrics = 'accuracy' # Standard metric
+)
+
+# SHOW ARCHITECTURE
+# plot_model(model)
+
+```
+
+```{r, model.summmery.cnn}
+summary(model)
+```
+
+
+```{r, fit.cnn.model, message=FALSE, include=FALSE}
+
+set.seed(777)
+
+# Train the model
+history <- model %>% fit(
+   x_train_reshaped, y_train,
+   epochs = 30, # determines how many times the entire data will pass trough the model 
+   # during training. This allows the model to learn from the data and update its params, increasing performance!
+   batch_size = 128,
+   validation_split = 0.2, # using 5 fold cv for training.
+   use_multiprocessing = TRUE # smoke'em if you have'em.
+)
+
+```
+
+
+
+
+```{r, eval.cnn, message=FALSE, include=FALSE}
+
+# Evaluate the model on test data
+acc_cnn <- model %>% evaluate(x_test_reshaped, y_test)
+
+# good enough!
+acc_cnn <- as.numeric(acc_cnn[2])
+
+
+```
+
+### Resultat
+
+I denna sektion presenterar vi resultat från de tre modellerna. Vi utvärderade prestandan med hjälp utav test-accuracy. Vi jämförde modellerna med varandra och en baseline naive bayes classifier. Vi såg att resultaten taktar väl mot teori. Inledningsvis såg vi att samtliga modeller presterade bättre än baseline, naive bayes classifier. KSVM fungerade bra, nästan lika bra som ANN och CNN som är långt mer komplexa modeller. Detta påvisar att Kernel-tricket är användbart för att höja mindre komplexa modellers prestanda. CNN presterade bäst vilket är att vänta eftersom denna modell är byggd för att hantera just bilddata. Konvolveringen medgav att vi kunde extrahera meningsfulla features innan vi passade datamaterialet genom de dolda lagren(jämfört med ANN som endast innehåller ett antal dolda lager). 
+
+
+## Tabell 1: Test accuracy för Naive bayes, KSVM, ANN och CNN respektive.
+
+```{r, collect.res, message=FALSE, warning=FALSE}
+
+# Thu Mar 14 14:32:48 2024 ------------------------------
+# Extract results.
+global_res <- round(data.frame("Naive Bayes" = acc_baseline, "KSVM" = acc_svm, 
+                               "ANN" = acc_ann, "CNN" = acc_cnn), digits = 4) 
+colnames(global_res) <- c("Naive Bayes", "KSVM", "ANN", "CNN")
+
+# Thu Mar 14 14:32:51 2024 ------------------------------
+# plot table using gt
+gt::gt(global_res)
+
+```
+
+Utifrån resultaten i tabell 1 kunde vi dra följande slutsatser. Även om CNN adderar fler lager, därmed ökar komplexiteten och beräkningsbördan, så verkar det ge en ökad test-accuracy. Därför rekommenderas att använda CNN för liknande situationer där vi behöver klassificera bilder av exempelvis klädprodukter.
+
+
+### Diskussion
+
+När vi jämförde de olika resultaten såg vi att de taktade väl mot teorin. En möjlig förklaring till varför CNN prestrerar bätttre än ANN är förmodligen eftersom vi fångade upp flera aspekter av bilddatat med hjälp av de konvolverande lagren. Trots att vi nyttjade max pooling vilket skalar ned datamaterialet, i syfte att undvika överanpassning kan vi se att risken för överanpassning ökar. Om vi studerar plot 4 och plot 5 så ser vi metrics för träningsprocessen. Notera särskilt hur tränings- och valideringsloss konvergerar och därefter avviker för CNN i högre grad än för ANN. Detta tolkar jag som att CNN överanpassar sig till datamaterialet i högre grad än ANN där spridningen mellan tränings- och validerinsloss är mindre. Notera även att CNN har flera tränings-epoker, antalet gånger nätverket passar igenom data och justerar vikter, vilket också kan leda till överanpassning. Detta bör man vara vaksam mot och det är därför bra praxis att studera sina träningsplottar.
+
+
+## Plot 4: Träningshistorik för ANN
+```{r, compare.overfit.ann, fig.height=3}
+# plot training history ANN
+plot(history0) + theme_bw()
+
+```
+
+
+## Plot 5: Träningshistorik för CNN
+```{r, compare.overfit.cnn, fig.height=3}
+# plot training history CNN
+plot(history) + theme_bw()
+
+```
+En annan viktig punkt för övervägande är just beräkningsbördan särskilt om man vill köra modellen online, i produktion. Jag hade gärna sett att vi testat att sätta modeller i produktion genom att exempelvis bygga prediktions-dashboards i shiny och köra modellerna mot en databas, detta skulle fläta samman det vi lärt oss tidigare under utbildningen på ett sätt som flyttar oss närmare industrin. Det finns fortfarande utrymme att mixtra med modellerna, de accuracies jag tagit fram är förmodligen inte topp 10 på kaggle, förmodligen inte topp 5 i klassen. Om man accepterar längre träningstider så kan man öka antalet principalkomponenter för KSVM, öka antalet lager och testa andra typer av lager för både CNN och ANN, även paralellisering är möjlig, där man tränar flera lager samtidigt, dessa kan anpassas för att fånga upp olika aspekter och slutprodukten kan då liknas vid ensemble learning, fast för deep learning.
+
+En väldigt intressant och viktig övning i deep learning. Jag lärde mig massor, tack.
+

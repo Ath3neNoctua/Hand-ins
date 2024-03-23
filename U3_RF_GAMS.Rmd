@@ -1,0 +1,744 @@
+---
+title: "Inlämning 3"
+author: "Söderström J."
+date: "2024-03-04"
+output: 
+  pdf_document: 
+    latex_engine: lualatex
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+
+```{r, libs, include=FALSE, warning=FALSE, message=FALSE}
+# install.packages("gt")
+library(tidymodels) # För modellering i allmänhet, dplyr osv.
+library(mgcv) # GAMs
+library(randomForest) # Random forests och verktyg för ds
+library(gt) # för tabeller.
+```
+
+### Om GAMs
+
+### Inledning
+
+Denna inlämning är uppdelad i två uppgifter,vi återkommer till den andra deluppgiften. Syftet med den första deluppgiften var att ansätta en GAM(General Additive Model) på ett datamaterial från ISLR2^[James G, Witten D, Hastie T, Tibshirani R (2022)] i R. Därefter undersöka huruvida variabler kunde exkluderas. Därefter undersöka vilka variabler som bäst representeras som icke-linjära respektive linjära termer. Slutligen tolka modellen och dra slutsatser med hjälp av våra fynd. För att ansätta modellen nyttjades mgcv^[Wood, S.N. (2011) Fast stable restricted maximum likelihood and marginal likelihood estimation of semiparametric generalized linear models.]. De rekommendationer som följdes kom i huvudsak från Noam Ross et al. på Datacamp^[Nonlinear Modeling with Generalized Additive Models (GAMs) in R]. 
+
+Inledningsvis kontrollerades de antaganden som görs vid modellering med GAMs via exploratory analys. Därefter ansattes och justerades flera modeller efter rekommendationer från DataCamp. Eftersom det kan vara svårt(till omöjligt) att säga om en modell är bra eller inte utan en jämförelse; valde jag att jämföra med motsvarande glm, som är känd från utbildningen sedan innan. 
+
+### Data
+
+Datamaterialet, se tabell 1, innehåller information om olika biltyper, inklusive deras tekniska egenskaper och bränsleekonomi. Det innehåller 9 variabler, företrädesvis, 8 prediktorer och en responsvariabel. För denna uppgift var prediktorer som följer; 1. Cylinders; antal cylindrar i bilens motor, 2. Displacement; motorutrymme(inches i kvadrat), 3. Horsepower; vridmoment mätt i hästkrafter, 4. Weight; bilens vikt(pounds), 5. Acceleration; uppmätta sekunder för att gå från 0-100km/h(60mph), 6. Year; årsmodell, 7. Origin; En kategorisk variablel som representerar ursprung(1 = American, 2 = European, 3 = Japanese). 8. Name; Bilens namn(tillika make and model; eg. 'Ferrari Roma'). Våran respons var mpg; som är ett mått på ett fordons effektivitet uppmätt i 'miles per gallon', en hög siffra innebär ett bra resultat. Datamaterialet innhöll inga saknade värden.
+
+## Tabell 1: Numerisk beskrivning av datamaterial(exklusive name)
+```{r, snabbkoll}
+# Numerisk tabell mha skimr.
+#summary(ISLR2::Auto)
+
+# Handmatar från summary för att göra till tabell.
+data_besk <- data.frame(
+  Variable = c("mpg", "cylinders", "displacement", "horsepower", "weight", "acceleration", "year", "origin"),
+  Min = c("9.00", "3.000", "68.0", "46.0", "1613", "8.00", "70.00", "1.000"),
+  First_Quartile = c("17.00", "4.000", "105.0", "75.0", "2225", "13.78", "73.00", "1.000"),
+  Median = c("22.75", "4.000", "151.0", "93.5", "2804", "15.50", "76.00", "1.000"),
+  Mean = c("23.45", "5.472", "194.4", "104.5", "2978", "15.54", "75.98", "1.577"),
+  Third_Quartile = c("29.00", "8.000", "275.8", "126.0", "3615", "17.02", "79.00", "2.000"),
+  Max = c("46.60", "8.000", "455.0", "230.0", "5140", "24.80", "82.00", "3.000"))
+
+
+# plotta tabell
+gt::gt(data_besk)
+
+```
+
+
+
+
+```{r, dela data, include=FALSE}
+
+# Mon Mar  4 12:15:07 2024 ------------------------------
+
+# Börjar med att dela datat i test och träningsdata; best practice.
+df <- ISLR2::Auto
+
+# re-produce
+set.seed(2) 
+# train/test split.
+df <- initial_split(df, prop = 8/10) # split using 3/4 of data for 
+# trainig and eval on rest.
+df_train <- training(df) # assign training data to own data frame
+df_test <- testing(df) # assign test data to own data frame
+```
+
+
+GAMs är en förlängning av glm tillhörande exponentialfamiljen - det vara värt att repetera de antaganden vi gjorde - i korthet motsvarande antaganden för glm:er med samma länkfunktion; gaussian eller identitetslänken för detta scenario. 
+
+För det första, additivitet, det vill säga att vi modellerar ett samband som kan representeras av en linjärkombination av smoothing funktioner; eller splines; där varje prediktor i modellen representerar en spline. Smoothness, GAM antar att de splines som nyttjas kan representeras av mjuka kurvor och är kontinuerliga. Oberoende observationer, det vill säga slumpmässiga mönster i modellens feltermer, äk 'random noise'. Feltermerna följer någon fördelning ur exponentialfamiljen, eg. standardnormal, binomial, poisson. Samt ingen stark multikolinjäritet. Vi kontrollerade samtliga antaganden men sidbegränsningen medger ej inkludering här; resultaten från dessa finns i bifogad kod.
+ 
+I en pairsplot, plot 1, ögonbesiktade vi sambandet mellan de variabler vi hade. 
+
+## Plot 1: Pairsplot för linjära samband mellan variabler i träningsdatat
+```{r}
+# Vanlig pairsplot
+pairs(df_train, lower.panel = NULL, upper.panel = panel.smooth)
+```
+
+Vi konstaterade att det fanns starka korrelationer mellan flera prediktorer och responsen men även korrelationer mellan prediktorer vilket kunde leda till eventuella problem med multikolinjäritet.  Variablerna name och origin borde ha väldigt liten effekt på en bils bränsleeffektivitet. Även omvänt, variabler som har att göra med fordonets prestanda, såsom motorutrymme, hästkrafter, cylindrar och vikt torde ha en effekt på bränsleeffektivitet. 
+
+
+```{r, include=FALSE}
+
+# Sat Mar  2 11:53:23 2024 ------------------------------
+
+# settings for base r plotting engine.
+par(mfrow = c(8, 1), mar = c(1, 1, 1, 1))
+# loop over var in training data
+for(name in colnames(df_train)) {
+ # boxplots are possible for numeric vars 
+ if(is.numeric(df_train[, name])) {
+  # produce boxplots
+  boxplot(df_train[, name], breaks = 100, main = name,
+          horizontal = T); 
+  #add median line
+  abline(v = median(df_train[, name]), col = "red", lty = 2, lwd = 2) 
+ } else {
+  # if not numeric, eg. 'chas', move along
+  next
+ }
+}
+```
+
+
+```{r, include=FALSE}
+
+# --"--
+par(mfrow = c(8, 1), mar = c(1, 1, 1, 1))
+for(name in colnames(df_train)) {
+ if(is.numeric(df_train[, name])) {
+  # note this will produce histograms
+  hist(df_train[, name], breaks = 100, main = name); 
+  # add mean line
+  abline(v = mean(df_train[, name]), col = "red", lwd = 2, lty = 2) 
+ } else {
+  next
+ }
+}
+
+```
+
+### Metod 
+
+Vi testade att ansätta en modell efter vår egen tro(top down - vi hade en tanke om vilka effekter som var viktiga från plot 1) med hjälp av kubiska splines^[ Wood S.N., N. Pya and B. Saefken (2016) Smoothing parameter and model selection for general smooth models (with discussion)], vilket medger att tilldela, eller portionera ut, frihetsgrader till de variabler som man tror är viktiga och har icke-linjära effekter. Därefter justerade vi denna modell genom att utvärdera konkurvitet^[Wood S.N., N. Pya and B. Saefken (2016) Smoothing parameter and model selection for general smooth models (with discussion)] som är ett mått på hur mycket en splinefunktion beror på en annan splinefunktion, lite som multikolinjäritet men för smooth spline funktioner. Om konkurviteten var högre än 0.8 omvandlades variabeln till linjär, om den var insignifikant exkluderades variabeln. Därefter testade vi att ansätta motsvarande modell med restricted maximum likelihood^[Wood, S.N. (2011) Fast stable restricted maximum likelihood and marginal likelihood estimation of semiparametric generalized linear models.] (bottom up - vi lät stickprovet uttrycka vilka effekter som var viktiga). Slutligen, då det är svårt till omöjligt att säga om en modell är bra eller inte utan en jämförelse, så jämförde vi test-MSE mot en vanlig linjär regression(gaussian glm, som är känd från utbildningen sedan innan) skattad med maximum likelihood.  
+
+För att fånga upp icke-linjära effekter nyttjar GAMs olika typer av spline-funktioner. En spline är en metod för att skapa en smidig kontinuerlig kurva från en uppsättning datapunkter^[Wood, S.N. (2017) Generalized Additive Models: An Introduction with R (2nd edition)]. Vi nyttjade b-splines som är en allmän och flexibel typ av spline som kan anta vilken grad som helst. Kurvans form begränsas av en basfunktion, som kan vara kubisk. Kubiska splines består av kubiska polynom där varje segment mellan två datapunkter definieras av ett eget kubiskt polynom. Med kubiska splines är kurvan alltid kontinuerlig upp till andra derrivatan, vilket ger en jämn kurva mellan datapunkterna. Detta beror förstås på valet av knutpunkter - tillika hur många frihetsgrader vi valt att ge en specifik prediktor.  
+
+Den mest utmärkande skillnaden - kubiska splines är en enklare typ av spline som ger oss, som analytiker större kontroll över modellen, medan b-splines i allmänhet nyttjar någon form av penalisering eller shrinkage för att hitta den bästa tillpassningen givet innevarande stickprov. Vi följde datacamps rekommendation^[Nonlinear Modeling with Generalized Additive Models (GAMs) in R] och nyttjade restricted maximum likelihood.\
+
+**Test-mse = E[(Y - $\hat f$(x))^2]**\
+
+**E[(f(x) - $\hat f$(x))^2]** betecknar de kvadrerade skillnaderna mellan det sanna värdet i testdatat **Y** och dess skattningar **$\hat f$(x)**.
+
+
+### Resultat
+
+```{r, echo=FALSE, include=FALSE}
+
+# Datacamp rekommenderade att tillpassa en model och därefter justera efter konkurvitet. Där konkurviteten föredras vara under 0.8.
+# Annars exkluderas variabeln alternativt adderas fler knutpunkter. Alternativt om stöd för icke-linjär effekt saknas inkludera som linjär prediktor.
+
+# Sat Mar  2 13:13:24 2024 ------------------------------
+# Ansätter GAM med kubiska splines och något rimligt antal knutar. 
+m0 <- gam(mpg ~ s(horsepower, bs = "cr", k = 6) + s(weight, bs = "cr", k = 6) + 
+     s(acceleration, bs = "cr" , k = 6) + displacement + s(year) + as.factor(origin), 
+     data = df_train)
+
+# concurvity - assess how much one is a smooth curve of other - non-linear proxy for multikolinearity. 
+# How much is each smooth predetermined by other smooths; high = 0.8 - so, ideally, we want val < 0.8.
+# concurvity(m0, full = T)
+# If val to low or problematic concurv drop vars until fixed - will yield better prediction.
+
+# m1 <- gam(mpg ~ s(weight, bs = "cr", k = 6) + 
+#     s(acceleration, bs = "cr" , k = 10) + cylinders + year, data = df_train)
+
+# concurvity(m1, full = T)
+
+# m2 <- gam(mpg ~ s(weight, bs = "cr", k = 6) + 
+#     s(acceleration, bs = "cr" , k = 50) + cylinders + year, data = df_train)
+
+# concurvity(m2, full = T)
+
+# m3 <- gam(mpg ~ s(weight, bs = "cr", k = 6) + 
+#     s(acceleration, bs = "cr" , k = 35) + cylinders + year, data = df_train)
+
+# concurvity(m3, full = T)
+
+m4 <- gam(mpg ~ weight + s(acceleration, bs = "cr" , k = 3) + s(year, bs = "cr", k = 3) + as.factor(origin), 
+     data = df_train)
+
+# Which vars have a close relationship; Look for problematic shapes and intervals
+#concurvity(m4)
+
+# Weight och horsepower har fortfarande ett problematiskt förhållande. Det får ändå duga.
+#par(mfrow = c(2, 2)) 
+# plot(m4, all.terms = T, pages = 1, residuals = T, se = T, shade = T, shade.col = "steelblue")
+# summary(m4)
+
+# gam.check(m4)
+# residualerna ser jättefina ut, egentligen inget att anmärka, om man ska vara petig, svaga tendenser till trattformation i variansen för residualerna. 
+
+```
+
+
+```{r, include=FALSE}
+# Fit gam using REML.
+# Restricted maximum likelihood. 
+m5 <- gam(mpg ~ weight + s(acceleration) + s(year) + as.factor(origin), 
+          data = df_train, method = "REML")
+# concurvity(m5)
+
+# plot gam
+plot(m5, all.terms = T, pages = 1, residuals = T, se = T, shade = T, shade.col = "steelblue")
+
+# summary(m5)
+```
+
+
+```{r, include=FALSE}
+# Baseline modell för jämförelse, ty svårt att säga om en modell är bra; oftast lättare att säga om den är bättre eller sämre än någon alternativ modell. 
+
+baseline <- glm(mpg ~ weight + acceleration + year + as.factor(origin), family = "gaussian", 
+               data = df_train)
+#plot(baseline)
+# summary(baseline)
+
+```
+
+
+
+```{r, include=FALSE}
+
+# Visually compare to baseline; on accuracy. 
+# Set params for plot engine
+par(mfrow = c(1, 3))
+
+# plot, actual vs predicted from test data then add diagonal line. 
+plot(df_test$mpg ~ predict(m4, newdata = df_test));abline(coef = c(0,1))
+
+#
+plot(df_test$mpg ~ predict(m5, newdata = df_test));abline(coef = c(0,1))
+
+#
+plot(df_test$mpg ~ predict(baseline, newdata = df_test));abline(coef = c(0,1)) 
+
+
+```
+
+I vår slutgiltiga modell kunde mpg förklaras av fordonets vikt, acceleration, årsmodell och ursprung som faktor. Vi jämförde test-mse, i tabell 2, för båda typer av GAM och en baseline GLM.
+
+
+## Tabell 2: Jämförelse av test-mse för GAM;kubisk, GAM;REML och en baseline GLM
+```{r, message=FALSE}
+
+# Calculate est. test-mse.
+
+temp <- data.frame(
+
+ # MSE
+"Cubic splines" = mean(df_test$mpg - predict(m4, newdata = df_test))^2,
+ 
+ # MSE
+"Restricted maximum likelihood" = mean(df_test$mpg - predict(m5, newdata = df_test))^2,
+
+# MSE
+"Lm au naturel" = mean(df_test$mpg - predict(baseline, newdata = df_test))^2
+)
+
+gt::gt(round(temp, 5))
+
+#temp
+```
+
+Vi sökte stöd för icke-linjära effekter genom att, först undersöka konkurvitet, därefter utfördes ett anovatest på vår bästa modell. Vi fann stöd för icke-linjära effekter i acceleration och årsmodell.
+
+
+```{r, include=FALSE}
+
+# kontrollera; konvergens; full konvergens bäst; ej konvergens om ej tillräcklig data, eller för många prediktorer.
+# basis söker mönster i residualer; borde vara random; k = antal smooth, små p-värden; EJ random residualer, ej tillräckligt många basfunktioner(k).
+par(mfrow = c(2, 2))
+
+# Mon Mar  4 18:05:26 2024 ------------------------------
+# Från statsexchange.
+type <- "deviance"  ## "pearson" & "response" are other valid choices
+resid <- residuals(m5, type = type)
+linpred <- napredict(m5$na.action, m5$linear.predictors)
+observed.y <- napredict(m5$na.action, m5$y)
+
+# Mon Mar  4 18:06:01 2024 ------------------------------
+
+
+qq.gam(m5, rep = 0, level = 0.9, type = type, rl.col = 2, 
+       rep.col = "gray80")
+
+# Mon Mar  4 18:06:56 2024 ------------------------------
+
+hist(resid, xlab = "Residuals", main = "Histogram of residuals")
+
+# Mon Mar  4 18:07:02 2024 ------------------------------
+
+plot(fitted(m5), observed.y, xlab = "Fitted Values", 
+     ylab = "Response", main = "Response vs. Fitted Values")
+
+
+
+# Mon Mar  4 18:06:58 2024 ------------------------------
+
+
+plot(linpred, resid, main = "Resids vs. linear pred.", 
+     xlab = "linear predictor", ylab = "residuals")
+
+
+# Residualer ser bra ut, inget fom får mig att överväga åtgärder.
+ 
+```
+
+Ett snabbtest som datacamp rekommenderar är att plotta upp effekterna med tillhörande 95% konfidensintervall och föreställa sig en horisontell linje genom konfidensintervallet. Om hela linjen ryms inom intervallet så kan man tänka sig att vi saknar bevis för icke-linjära effekter. Detta medger inte sidbegränsningen men vi nämnder det ändå.  
+
+
+
+## Tabell 3: Anova utförd på slutlig modell
+```{r, anova}
+
+# Undersök bevis för termer i modellen. 
+# anova(m5)
+
+# Handmatar från anova för tabell.
+anva <- data.frame(
+  Term = c("weight", "as.factor(origin)", "s(acceleration)", "s(year)"),
+  F_value = c(399.459, 6.774, 2.602, 52.017),
+  p_value = c("< 2e-16", "0.00132", "0.048", "<2e-16"),
+  df = c(1, 2, 2.522, 3.574),
+  Ref_df = c(" ", " ", 3.248, 4.409)
+)
+
+# Print the table
+gt::gt(anva)
+```
+
+Samtliga prediktorer är signifikanta vid 5% signifikansnivå och det finns stöd för icke-linjära effekter vid 5% signifikansnivå i den föredragna modellen; som är GAM tillpassad med b-splines och restricted maximum likelihood. 
+
+
+
+## Tabell 4: Koefficientskattningar för slutlig modell.
+```{r}
+#summary(m5)
+
+# Skapa df för koefs.
+parametric_coefficients <- data.frame(
+  Parameter = c("(Intercept)", "weight", "Origin: Europe", "Origin: Japan"),
+  Estimate = c(40.0862856, -0.0058231, 1.2257711, 1.9493283),
+  Std_Error = c(0.9890196, 0.0002914, 0.5514425, 0.5454586),
+  t_value = c(40.531, -19.986, 2.223, 3.574),
+  p_value = c("< 2e-16", "< 2e-16", 0.026964, 0.000409),
+  Significance = c("***", "***", "*", "***")
+)
+
+# tabell med gt
+gt::gt(parametric_coefficients)
+
+# ds för smooths
+smooth_terms <- data.frame(
+  Term = c("s(acceleration)", "s(year)"),
+  edf = c(2.522, 3.574),
+  Ref_df = c(3.248, 4.409),
+  F_value = c(2.602, 52.017),
+  p_value = c(0.048, "<2e-16")
+)
+
+# tabell med gt
+gt::gt(smooth_terms)
+
+```
+
+
+Variabeltolkningar är snarlika mellan GAMs och GLM:er. Faktorer tolkas på samma sätt; det vill säga, tabell 4, vi har 3 grupper i faktorvariabeln ursprung, därmed jämförs de två senare grupperna mot den första, jämförelsegruppen, USA. Vi kan se att mpg är i genomsnitt ca 1.22 mpg högre för fordon från Europa jämfört med fordon från USA och ca 1.95 mpg högre för fordon från Japan jämfört med USA, allt annat lika. Vikten innebär en marginell, men signifikant, minskning i mpg, om ca 0.006, allt annat lika. Vad gäller tolkningar av splines så har dessa flera koefficienter. Ett tillvägagångssätt är att utvärdera mha edf(effective degrees of freedom), som anger hur komplex en spline är, där en edf på 1 innebär en helt linjär effekt och höga värden innebär icke-linjära effekter - tankesättet är analogt till hur vi portionerar frihetsgrader i form av knutpunkter för kubiska splines, e.g en väldigt hög edf innebär att kurvan har flera 'riktningsförändringar' grafiskt beskrivet.   
+
+
+När vi jämförde test-mse i tabell 2 såg vi att GAM presterar bäst, relativt en glm, både med kubiska splines och REML. REML presterar bättre än kubiska splines vilket talar för att bottom up kan vara att föredra. 
+
+### Om Random Forests
+
+### Inledning
+
+Den andra deluppgiften syftade till att, med avstamp i ett datamaterial om Titanic, det berömda skeppet som sjönk på sin jungfruresa år 1912 efter att ha kolliderat med ett isberg prediktera med hjälp av random forests huruvida en resenär överlevde eller inte utifrån ett antal prediktorer. 
+
+Inledningsvis kommer vi att tillpassa en random forest modell. Därefter kommer vi att undersökta OOB(Out of bag error rate) för ds. Därefter kommer vi att använda modellen för att prediktera huruvida individerna i testdatat överlevde eller inte. Därefter kommer vi att jämföra accuracy för enskilda träd jämfört med aggregerade resultat. Slutligen kommer vi att utföra 2 experiment där vi undersöker effekten av att variera parametrarna ntree och mtry. 
+
+
+### Data 
+
+Datamaterialet består av en responsvariabel och 12 prediktorer. Respons: Survived; Om passageraren överlevde (1) eller inte (0). Prediktorer: Pclass (Passagerarklass); Klassindelningen av passagerarens biljett, som visar om de var i första, andra eller tredje klass. Sex; Passagerarens kön. Age; Passagerarens ålder. SibSp(Syskon/Partner ombord); Antal syskon eller partner som passageraren hade ombord. Parch(Föräldrar/Barn ombord); Antal föräldrar eller barn som passageraren hade ombord. Fare; Hur mycket passageraren betalade för sin biljett. Embarked; Hamnen där passageraren gick ombord på Titanic; Cherbourg (C), Queenstown (Q), eller Southampton (S). Titel; Vilken titel passageraren hade; Master, Miss, Mr, Mrs, Rare Title. Fsize; Passagerarens familjestorlek. Familjestorlekskategori(FsizeD):  Samll, large, singelton. Child; 1 om kategoriserad som barn; utifrån ålder; annars 0. Mother; 1 om kategoriserad som mamma till ett barn; annars 0. Dessa beskrivs närmare i tabell 5 och tabell 6.\  
+
+```{r, include=FALSE}
+
+# Sat Mar  2 16:24:45 2024 ------------------------------
+rm(list = ls())
+
+setwd("D:/ckurs")
+temp <- read.csv("titanic_data.csv",sep = " ", header = T)
+
+temp <- temp %>% mutate_if(is.character, as.factor)
+
+# Mon Mar  4 14:39:16 2024 ------------------------------
+temp$Survived <- as.factor(temp$Survived)
+df <- temp
+
+```
+
+
+```{r, include = FALSE}
+
+# Mon Mar  4 16:11:24 2024 ------------------------------
+
+# re-produce
+set.seed(2024) 
+# train/test split.
+df <- initial_split(df, prop = 4/5) # split using 3/4 of data for 
+# trainig and eval on rest.
+df_train <- training(df) # assign training data to own data frame
+df_test <- testing(df) # assign test data to own data frame
+
+
+```
+
+
+```{r, include = FALSE, eval=FALSE}
+# settings for base r plotting engine.
+par(mfrow = c(8, 1), mar = c(1, 1, 1, 1))
+# loop over var in training data
+for(name in colnames(df_train)) {
+ # boxplots are possible for numeric vars 
+ if(is.numeric(df_train[, name])) {
+  # produce boxplots
+  boxplot(df_train[, name], breaks = 100, main = name,
+          horizontal = T); 
+  #add median line
+  abline(v = median(df_train[, name]), col = "red", lty = 2, lwd = 2) 
+ } else {
+  # if not numeric, eg. 'chas', move along
+  next
+ }
+}
+
+
+# --"--
+par(mfrow = c(9, 1), mar = c(1, 1, 1, 1))
+for(name in colnames(df_train)) {
+ if(is.numeric(df_train[, name])) {
+  # note this will produce histograms
+  hist(df_train[, name], breaks = 100, main = name); 
+  # add mean line
+  abline(v = mean(df_train[, name]), col = "red", lwd = 2, lty = 2) 
+ } else {
+  next
+ }
+}
+
+```
+
+
+
+## Tabell 5: Numerisk beskrivning av kontinuerliga prediktorer.
+```{r, tbl5}
+
+# Mon Mar  4 14:41:10 2024 ------------------------------
+#str(df_train)
+#summary(df_train)
+
+# Handmata för numeriska
+numeric_data <- data.frame(
+  Variable = c("Age", "SibSp", "Parch", "Fare", "Fsize"),
+  Min = c(0.42, 0.00, 0.00, 0.00, 1.00),
+  First_Qu. = c(20.00, 0.00, 0.00, 7.91, 1.00),
+  Median = c(28.00, 0.00, 0.00, 14.45, 1.00),
+  Mean = c(29.27, 0.523, 0.3816, 32.20, 1.905),
+  Third_Qu. = c(37.00, 1.00, 0.00, 31.00, 2.00),
+  Max = c(80.00, 8.00, 6.00, 512.33, 11.00)
+)
+
+#
+gt::gt(numeric_data)
+```
+
+
+## Tabell 6: Klassbalans för faktorvariabler, inklusive respons(Survived)
+```{r, tbl6}
+
+# handmata för faktorer
+factor_data <- data.frame(
+  Variable = c("Survived", "Pclass", "Sex", "Embarked", "Title", "FsizeD", "Child", "Mother"),
+  Levels = c("0:549, 1:342", "1.000-3.000 (Min-Max)", "female:314, male:577", "C:170, Q:77, S:644", 
+             "Master:40, Miss:185, Mr:517, Mrs:126, Rare Title:23", 
+             "large:62, singleton:537, small:292", "Adult:754, Child:137", "Mother:55, Not Mother:836")
+)
+
+# 
+gt::gt(factor_data)
+
+```
+
+
+### Metod
+
+En Random Forest-modell består av många beslutsträd, som var och en bidrar till en prediktion. Ett beslutsträd liknar ett stort flödesschema där varje vägval baseras på en egenskap, e.g ålder eller kön, som leder till ett visst resultat, e.g om en passagerare överlevde Titanic-olyckan. Random Forest kombinerar många beslutsträd genom bootstrap aggregation. Bootstrap Aggregation, ofta förkortat till "bagging", är en ensembleteknik som används för att förbättra stabiliteten och prestandan hos beslutsträd. Bagging minskar variansen och hjälper till att undvika överanpassning, vilket är ett vanligt problem för komplexa modeller, såsom beslutsträd.
+
+Grundidén bakom bagging är att kombinera flera modeller för att skapa en sammanlagd modell som är mer robust och pålitlig än de enskilda modellerna. Processen fungerar enligt följande:
+
+1. **Bootstrap-sampling**: Skapar flera olika träningsdataset genom random sampling, med återläggning. 
+
+2. **Träna modeller**: För varje bootstrap-sample tränas ett beslutsträd. Eftersom varje sample är lite annorlunda, kommer modellerna också att bli olika.
+
+3. **Aggregera**: När alla modeller är tränade, kombineras deras prediktioner till en slutlig prediktion. För regressionsproblem tar man genomsnittet av modellernas förutsägelser. För klassificeringsproblem använder man oftast majoritetsröstning, där den klass som flest träd röstar på blir den slutliga förutsägelsen.
+
+Två viktiga hyperparametrar i Random Forest-modellen är **mtry** och **ntree**:
+
+- **mtry**: Antalet egenskaper som slumpmässigt väljs vid varje delning i ett träd. Genom att välja ett subset av olika egenskaper för varje träd säkerställs att träden inte är beroende av samma egenskaper, vilket gör modellen mer robust mot överanpassning. 
+
+- **ntree**: Antalet träd i skogen. Generellt kan fler träd ge en mer stabil och tillförlitlig förutsägelse, men det ökar också beräkningstiden och risken för överanpassning. Det finns en balans mellan att ha tillräckligt många träd för att få en bra modell och att inte ha så många att det blir ineffektivt.
+
+Syftet med dessa hyperparametrar är att finjustera modellen, därmed förbättra dess förmåga att göra korrekta förutsägelser. Genom att justera **mtry** och **ntree** kan man optimera modellens prestanda för en specifik uppgift. Det handlar om att hitta en bra balans mellan prestanda och dess generaliserbarhet. 
+
+
+
+### Resultat
+
+Vi tillpassade en modell med ntree: 100 och mtry: 3, se avsnittet metod för längre beskrivning, och tog därefter OOB(out of bag error), dels för alla träd men även den slutliga OOB som var ca 0.176. OOB är en indikator på prestanda och kan användas för att finjustera modellparametrar, såsom ntree eller mtry. Eftersom OOB inte kräver en separat valideringsdataset, är den särskilt användbar i situationer där tillgänglig data är begränsad. En OOB på 0.176 innebär att vi felklassar utfallet i 17.6% av fallen; detta kan betraktas som en fingervisning över hur modellen kan komma att prestera på testdata.
+
+
+```{r, include=FALSE}
+# 2.1
+# Seed from task desc.
+set.seed(2024)
+
+# Fit the model
+rf_model <- randomForest(Survived ~ ., data = df_train, ntree = 100, mtry = 3)
+
+# Summary of the model
+#print(rf_model)
+```
+
+
+```{r, include=FALSE}
+# 2.2
+# plotta OOB. 
+# plot(rf_model$err.rate)
+
+# Ta fram oob
+#rf_model$err.rate[100, "OOB"]
+
+# extra; var importance, vilka prediktorer är viktigast.
+# hist(rf_model$importance)
+
+```
+
+Därefter nyttjade vi vår ansatta modell för att prediktera huruvida en resenär överlevde eller inte på testdata och utvärderade error rate. I tabell 7 ser vi att det genomsnittliga skattade testfelet ligger väldigt nära OOB, vilket är förväntat och bra.
+
+## Tabell 7: OOB vs. mean test error rate.
+```{r, oob}
+# 2.3 jämför
+gt::gt(round(data.frame("OOB" = rf_model$err.rate[100, "OOB"], "mean test error" = I(1 - mean(predict(rf_model, newdata = df_test) == df_test$Survived))), 4))
+
+```
+
+För att utvärdera prediktionsförmågan hos enskilda träd och jämföra med ensemblen av träd nyttjade vi skattad test-accuracy.
+
+
+## Tabell 8: Skattad test-accuracy för random forest och genomsnittlig test-accuracy för enskilda träd.
+```{r}
+
+set.seed(2024)
+
+
+# ensemble som referens
+ensemble_accuracy <- mean(predict(rf_model, df_test) == df_test$Survived)
+
+# individuella trädpreds
+all_tree_predictions <- predict(rf_model, df_test, predict.all=TRUE)$individual
+
+# accuracy för både
+tree_accuracies <- apply(all_tree_predictions, 2, function(predictions) {
+  mean(predictions == df_test$Survived)})
+
+#
+average_tree_accuracy <- mean(tree_accuracies)
+
+# 
+gt::gt(data.frame("Forest Accuracy:" = ensemble_accuracy, "Mean Ind tree Accuracy:" = average_tree_accuracy))
+
+```
+
+Vi ser att en forest presterar bättre än enskilda träd. Därefter genomförde vi ett experiment där vi varierade antalet ntree från 100 till 1000 i steg om 100, med 100 körningar per nivå för att utvärdera effekten av att öka antalet ntree. 
+
+```{r, sim, include=FALSE}
+
+set.seed(2024) # Ensure reproduce
+
+# Define the values of ntree to explore
+ntree_values <- c(100, 200, 300, 400, 500, 700, 1000)
+
+# Liusta för resultat
+accuracy_results <- list()
+
+for(ntree in ntree_values) {
+  accuracies <- numeric(100) # 100 accuracies
+  
+  for(i in 1:100) {
+    # Träna modell
+    rf_model <- randomForest(Survived ~ ., data = df_train, ntree = ntree, mtry = 3)
+    
+    # Prediktera och spara
+    predictions <- predict(rf_model, df_test)
+    
+    # beräkna acc och spara
+    accuracies[i] <- mean(predictions == df_test$Survived)
+  }
+  
+  # Sfpara för ntree
+  accuracy_results[[as.character(ntree)]] <- accuracies
+}
+
+
+# Mon Mar  4 16:51:24 2024 ------------------------------
+
+
+# Calculate mean, variance, and confidence interval for each ntree value
+results <- data.frame(ntree = character(), mean_accuracy = numeric(), variance = numeric(), 
+                      lower_CI = numeric(), upper_CI = numeric())
+
+for(ntree in names(accuracy_results)) {
+  accuracies <- accuracy_results[[ntree]]
+  mean_acc <- mean(accuracies)
+  var_acc <- var(accuracies)
+  
+  # Calculate 95% Confidence Interval
+  std_error <- sqrt(var_acc / length(accuracies))
+  error_margin <- qt(0.975, df=length(accuracies)-1) * std_error
+  lower_CI <- mean_acc - error_margin
+  upper_CI <- mean_acc + error_margin
+  
+  # Append to results dataframe
+  results <- rbind(results, data.frame(ntree = ntree, mean_accuracy = mean_acc, variance = var_acc, lower_CI = lower_CI, 
+                                       upper_CI = upper_CI))
+}
+
+# Print results
+#gt::gt(results)
+
+# Mon Mar  4 16:46:16 2024 ------------------------------
+```
+
+
+## Plot 2: Genomsnittlig testaccuracy med 95% konfidensintervall för 100 replikat per nivå,  ntree; 100 - 1000 i steg om 100.
+```{r, plotta ntree experiment}
+
+# gölr faktor av ntree för plot
+results$ntree <- factor(results$ntree, levels = unique(results$ntree))
+
+# Plot
+ggplot(results, aes(x = ntree, y = mean_accuracy, group = 1)) +
+  geom_line() + 
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_CI, ymax = upper_CI), width = 0.2) + # error bars för CI
+  labs(x = "Number of Trees (ntree)",
+       y = "Mean Accuracy") +
+  theme_minimal()
+
+```
+
+När vi ökar antalet träd ser vi att accuracy ökar. 
+
+
+Slutligen genomförde vi motsvarande experiment för mtry från 1 till 12 i steg om 1, 3, 6, 9 och 12. 
+
+```{r, include=FALSE}
+
+# Försöker få upp hastiget. kommentera bort om du ej vill använda.
+doParallel::registerDoParallel()
+
+num_models = 100
+
+ntree_fixed <- 500
+mtry_values <- c(1, 3, 9, 12)
+results_mtry <- list()
+
+
+# Samma som ovan bara för mtry...
+for (mtry in mtry_values) {
+  accuracies <- numeric(num_models) 
+
+
+  for (i in 1:100) {
+    rf_model <- randomForest(Survived ~ ., data = df_train, ntree = ntree_fixed, mtry = mtry)
+    predictions <- predict(rf_model, newdata = df_test)
+    accuracies[i] <- mean(predictions == df_test$Survived)
+  }
+  mean_accuracy <- mean(accuracies)
+  variance_accuracy <- var(accuracies)
+  se <- sqrt(variance_accuracy / num_models)
+  ci_lower <- mean_accuracy - qnorm(0.975) * se
+  ci_upper <- mean_accuracy + qnorm(0.975) * se
+
+  
+  results_mtry[[as.character(mtry)]] <- data.frame(
+    mtry = rep(mtry, num_models),
+    Accuracy = accuracies,
+    Mean_Accuracy = mean_accuracy,
+    Variance = variance_accuracy,
+    CI_Lower = ci_lower,
+    CI_Upper = ci_upper
+  )
+}
+
+all_results_mtry <- do.call(rbind, results_mtry)
+
+doParallel::stopImplicitCluster()
+
+```
+
+
+
+
+## Plot 3: Genomsnittlig testaccuracy med 95% konfidensintervall för 100 replikat per nivå, mtry; 1-12 i steg om 3, 9, 12. 
+```{r, warnings = FALSE, message=FALSE}
+# 
+all_results_mtry$mtry <- factor(all_results_mtry$mtry)
+
+# Plotting Mean Accuracy with Confidence Intervals for each 'mtry' value
+ggplot(all_results_mtry, aes(x = mtry, y = Mean_Accuracy, group = mtry)) +
+  geom_point(aes(color = mtry), size = 3) + 
+  geom_line(aes(color = mtry), size = 1) + 
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = mtry), width = 0.2) + 
+  scale_color_manual(values = c("red", "green", "blue", "purple")) + 
+  labs(x = "'mtry' Value",
+       y = "Accuracy") +
+  theme_minimal() 
+
+```
+
+
+### Diskussion
+
+När vi ökar antalet subsettade parametrar så ökar testaccuracy.
+
+
+
+De resultat vi såg under denna deluppgift taktar bra mot teori. Vi såg att OOB error var en bra fingervisning för test error rate i tabell 7. Vi såg att individuella träd har sämre prestanda än en forest i tabell 8 och vi såg att ökat antal träd ger ökad genomsnittlig test-accuracy i plot 2. Samma slutsats kunde dras för experimentet med mtry i plot 3. Med det sagt kan ett alldeles för stor antal träd leda till överanpassning, samt långa beräkningstider. Då det inte finns någon signifikant skillnad mellan ntree över 400 så bör man nog stanna där. Detsamma gäller mtry att använda alla parametrar vid innebär att passa modeller med samma parametrar och motverkar syftet med en random forest, därmed bör man välja någon siffra lägre än antalet tillgängliga parametrar. 
+
+
+De två sista expermienten liknar optimering av hyperparametrar som jag hoppas att vi får testa på mera inom snar framtid. Tack för mig.\
+
+Mvh

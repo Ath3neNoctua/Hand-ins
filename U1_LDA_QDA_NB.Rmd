@@ -1,0 +1,1103 @@
+---
+title: "Inlamning 1"
+author: "Söderström J."
+date: "2024-02-14"
+output:
+  pdf_document: default
+  html_document: 
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+rm(list = ls()) # Töm env innan körning
+setwd("D:/ckurs") # DETTA MÅSTE DU SÅKLART STÄLLA IN TILL MAPPEN DÄR DATAMATERIALET FINNS, ANNARS BLIR INLÄSNING AV DATAMATERIALET EJ MÖJLIG.
+```
+
+
+```{r, libraries, include=FALSE}
+
+# Wed Feb 14 17:34:04 2024 ------------------------------
+
+# Required installs.
+
+# Detta uppfyller koden skall kunna köras direkt; 
+
+# install.packages("tidyverse", "tidymodels", "discrim", "heplots", "doParallel", "cowplot", "skimr", "pak", "gt")
+# pak::pak("tidymodels/discrim")
+
+# OM NI INTE AVKOMMENTERAR OVAN FALLER GARANTIN.
+
+
+# Mon Feb 26 20:40:53 2024 ------------------------------
+library(tidyverse, quietly = T) # för datacrunching
+library(tidymodels, quietly = T) # för modellering
+library(discrim) # för konfusionsmatriser.
+library(heplots) # boxmtest för lika varians.
+library(gt) # För snygga tabeller
+
+```
+
+
+### Inledning
+
+Vi har fått i uppgift att prediktera huruvida en viss typ av portugisiskt vin bedöms utsökt kontra ej utsökt utifrån ett antal prediktorer bestående av vinets kemiska egenskaper. Vi ska prova följande modeller; Logistisk regression, Linjär diskriminantanalys(LDA), Kvadratisk diskriminant analys(QDA), Naive Bayes, K Nearest Neighbors(KNN). Dessa är kända från kursen sedan innan. Vi har även fått i uppgift att testa samtliga modeller med samtliga prediktorer och samtliga modeller med prediktorer som är signifikanta på 1% nivån för en vanlig logistisk regression.
+
+Inledningsvis laddades datamaterialet och en kategorisk responsvariabel skapades, samt en ytterligare prediktor som anger vinets färg. Därefter delades datamaterialet i tränings- och testdata. Därefter utfördes exploratory - som främst syftade till att kontrollera antaganden för de modeller vi använde samt för att bilda en grundläggande överblick över datamaterialet. Därefter ansattes ovan nämnda modeller med hjälp av tidymodels^[Kuhn et al., (2020). Tidymodels: a collection of packages for modeling and machine learning using tidyverse principles.]. Slutligen utvärderades de tillpassade modellerna utifrån skattat testfel. I ett senare skede diksuterades antagnaden/förutsättningar för respektive metod jämfört med dess klassificeringsresultat.
+
+### Data
+
+Vinho verde är ett vin från Minho i nordvästra Portugal. Detta vin står för ca 15% av den totala vinproduktionen i Portugal och ungefär 10% exporteras, till största del vitt Vinho verde^[Cortez et al., 2009]. Datamaterialet samlades in mellan 2004 maj - 2007 Februari från en avsatt tilldelning av ursprungsprover som testades vid en officiell provtagningsintstitution(CVRVV). CVRVV är en internationell profesionell organisation vars syfte är att förbättra kvaliteten och marknadsföringen av Vinho verde. Datat registrerades i ett datorsystem(iLab), som automatiskt hanterar den sensoriska analysprocessen. Varje datapunkt motsvarar ett givet test(analytiskt eller sensoriskt) och den färdigställda databasen har exporterats till ett ark i "csv-format"^[Socrata. (n.d.). Understanding the Socrata CSV format]. 
+
+Prediktorerna i datamaterialet baserade på physiokemiska tester, dessa är: 1 - fixed acidity, 2 - volatile acidity, 3 - citric acid, 4 - residual sugar, 5 - chlorides, 6 - free sulfur dioxide, 7 - total sulfur dioxide, 8 - density, 9 - pH, 10 - sulphates, 11 - alcohol, en 13:e prediktor - "type", som anger vinets färg lades till. Responsvariabeln i datamaterialet baserad på sensorisk data: 12 - quality. Quality anger den bedömda kvaliteten på en skala 1-10. Denna variabel omvanldades till en kategorisk responsvariabel där värden 1-6 anses not excellent och värden 7-10 anses excellent.
+
+
+```{r, load.red, include=FALSE}
+# Läser in den bifogade datafilen innehållande data för rött vin.
+temp_red <- read.csv("winequality-red.csv", header = T, sep = ";")
+temp_red$type <- as.factor("red")
+
+# Mon Feb 12 19:28:55 2024 ------------------------------
+# som glimpse fast bättre
+skimr::skim(temp_red)
+
+# snabb kik
+head(temp_red, n = 3)
+```
+
+
+
+```{r, load.white, include=FALSE}
+#upprepa procedur för white wine
+temp_white <- read.csv("winequality-white.csv", header = T, sep = ";")
+# sätter vintypen till vitt
+temp_white$type <- as.factor("white")
+
+# Mon Feb 12 19:28:55 2024 ------------------------------
+
+# som glimpse fast bättre
+skimr::skim(temp_white)
+
+# snabb kik
+head(temp_white, n = 3)
+```
+
+
+
+```{r, sammanfoga, include=FALSE}
+
+# behåll alla obs i båda df
+df <- temp_red %>% full_join(temp_white)
+
+# skapa klass-var enligt uppgiftsbeskrivning.
+df$cat_excellent <- as.factor(ifelse(df$quality >= 7, "excellent", "not excellent"))
+
+# Inspekterar första 3 uppifrån.
+head(df, n = 3)
+
+# Samma som tidigare.
+skimr::skim(df)
+
+# ser bra ut. 
+
+# Mon Feb 12 19:37:42 2024 ------------------------------
+rm(temp_red, temp_white)
+```
+
+
+
+```{r, splitta.data, include=FALSE}
+
+
+# Best practice är att dela datat innan man gör något annant överhuvudtaget. I syfte att undvika 
+# data leakage, och fantom-frihetsgrader; dvs, alla justeringar jag gör kostar ju också frihetsgrader. 
+# Om jag tjuvkikar och tar bort variabler på den grundvalen har jag potentiellt overfittat till in sample-datat för hand...
+
+# Mon Feb 12 19:43:07 2024 ------------------------------
+
+# train test split
+set.seed(2) 
+
+# train/test split. Detta innebär alltså en initial split där jag delar datat i två delar, en för träning
+# och en för skattning av testfel i populationen som jag kommer att använda för mina konfusionsmatriser.
+
+df_split <- initial_split(df, prop = 4/5) # split using 4/5 of data for training
+
+# Tilldelar de olika delarna till varsin dataframe; jag kommer inte att ropa upp träningsdatat fören det sista steget.
+df_train <- training(df_split) # assign training data to own data frame
+df_test <- testing(df_split) # assign test data to own data frame
+
+# Mon Feb 12 19:44:58 2024 ------------------------------
+
+```
+
+### Exploratory
+Exploratory analys av datamaterialet utfördes på träningsdata endast, detta är best practice för att undvika fantom frihetsgrader, som innebär att jag tar beslut eftersom jag vet hur testdatat ser ut, då riskerar jag att överanpassa modellen för hand, utan att det explicit syns i koden; därav namnet.
+
+De antaganden som gäller för LDA och QDA:
+
+**LDA (Linjär diskriminantanalys):**\
+- Förklarande variabler är normalfördelade.\
+- Prediktorerna har lika kovarians stratifierat på responsvariabeln.\
+- Observationerna är oberoende. Vilket gäller datamaterialets insamling och antas uppfyllt.\
+- LDA är särskilt bra när klassstorlekarna är lika.\
+
+**QDA (Kvadratisk diskriminantanalys):**\
+- Förklarande variabler är normalfördelade.\
+- Till skillnad från LDA tillåts olika kovariansmatriser för prediktorerna stratifierat på klass.\ 
+- Oberoende observationer. Vilket gäller datamaterialets insamling och antas uppfyllt.\
+- Bättre än LDA när antagandet om lika kovariansmatriser inte stämmer.\
+
+Det som återstod att kontrollera för LDA och QDA var alltså; om kovariansen mellan prediktorer stratifierat på responsvariabeln är samma; detta gäller endast LDA. Om klasserna i responsvariabeln är balanserade(gäller alla modeller) samt om prediktorerna kan antas komma ifrån en normalfördelning. 
+
+Vi testade om kovariansen mellan respektive prediktor stratifierat på responsvariabeln var samma med hjälp av ett Boxm test^[Box's 1949.]. Det vill säga vi testar kovariansen mellan prediktorer, så att kovariansen mellan prediktorer map viner som kategoriserats som excellent(blå) jämförs mot kovariansen mellan samma prediktorer map viner som kategoriserats som not excellent(röd). Detta genomfördes i syfte att kontrollera antagandet om prediktorernas lika kovarians stratifierat på responsvariabeln; som är ett antagande för linjär diskriminant analys. Vi testar:\ 
+
+H0 = Kovariansmatriserna är samma för prediktorerna stratifierat på responsvariabeln\
+Ha =  Kovariansmatriserna är inte samma för minst en av prediktorerna stratifierat på responsvariabeln
+
+```{r, boxm.test}
+# names(df_train)
+# genomför boxm test för lika kovariansmatriser, jag tar bara med variabler som är relevanta här, dvs ej quality och kontrollerar inte heller responsvariabeln mot sig själv. 
+boxm <- heplots::boxM(df_train[, 1:11], df_train$cat_excellent)
+boxm
+
+```
+
+H0 förkastas vid alla signifikansnivåer och antagandet om lika kovariansmatriser kan inte antas uppfyllt.
+
+
+```{r, klassbalans, include=FALSE}
+# kollar balans mellan klasser. 
+
+#table(df_train$type)
+
+table(df_train$cat_excellent)
+
+```
+
+Klasserna i repsonsvariabeln är ojämnt fördelade; innehåller 1000 observationer för excellent och 4197 observationer för not excellent. Detta påverkar prestandan för samtliga modeller. Det är möjligt att översampla minoritetsklassen med exempelvis syntetisk minoritetsklass oversampling^[N. V. Chawla et. al, 2011]. Detta skulle ge jämnfördelade klasser. Denna åtgärd ligger dock utanför avgränsningen för denna rapport och genomfördes inte.
+
+Vi testade normalfördelningsantagandet mha qqplottar för respektive numerisk prediktor, den kategoriska prediktorn för om vinet är rött eller vitt, type, kan per definition inte antas normalfördelad.
+
+## Plot 1: Qqplottar för numeriska variabler; samt en diagonal qqline.
+```{r, fig.width=8}
+
+# Wed Feb 14 16:11:38 2024 ------------------------------
+# 
+# Ställer in parametrar för R's plotengine. 
+par(mfrow = c(6, 1), mar = c(0.75, 0.75, 0.75, 0.75))
+# For loop för att plotta alla numeriska variabler i datamaterialet för att kontrollera ifall normalfördelning kan antas.
+for(name in colnames(df_train[, -12])) {
+ if(is.numeric(df_train[, name])) {
+  # note this will produce histograms
+  qqnorm(df_train[, name], main = name, pch = 1);qqline(df_train[, name], col = "red", lwd = 2, lty = 2) 
+ } else {
+  next
+ }
+}
+
+```
+
+Qqplottar är kända från kursen sedan tidigare. Antagande om normalfördelade prediktorer tycks vara uppfyllt, det finns tendenser till högerskevhet hos vissa prediktorer men inget som hoppar ut ur skärmen eller som får mig att överväga några åtgärder.\
+
+
+De angtaganden som gäller för logistisk regression är; 
+
+**Logistisk regression:**\
+- Kategoriskt utfall (binärt eller flerklass). Detta kan antas uppfyllt, se under rubriken data.\
+- Linjärt samband mellan log-oddset av responsen och numeriska prediktorer.\
+- Ingen perfekt multikollinjäritet.\
+- Oberoende observationer, vilket gäller datamaterialets insamling och antas uppfyllt.\
+
+Det som återstår att kontrollera är multikolinjäritet och linjärt samband mellan log odds och prediktorer. Med anledning av platsbrist utgår kontrollen av multikolinjäritet då detta spelar mindre roll för denna tillämpning, det påverkar säkerligen modellernas prestanda även vid prediktion men är av större vikt då vi bedriver hypotestester.
+
+## Plot 2: Linjärt samband mellan log-oddset av responsen och prediktorer
+Log odds på y-axeln och uppmätta värden för prediktorerna på x-axeln; värdena på x-axeln har utelämnats då de är oviktiga för detta ändamål.
+
+```{r, log.mot.preds, warning=FALSE, message=FALSE}
+
+# Skapar predikterade slh för att tillhöra excellent resp. not excellent från en valig logistisk regression.
+probabilities <- predict(glm(cat_excellent ~.-quality, family = "binomial", data = df_train), 
+                         type = "response")
+
+# Anger vilka prediktorer jag vill använda
+predictors <- colnames(df_train[, c(1:11)])
+
+# Tar fram logoddset och sparar i egen kolumn i. 
+mydata <- df_train[, c(1:11)] %>%
+ mutate(logit = log(probabilities/(1-probabilities))) %>%
+ gather(key = "predictors", value = "predictor.value", -logit)
+
+# Plottar resultatet.
+ggplot(mydata, aes(y = logit, x = predictor.value))+
+ geom_point(size = 0.5, alpha = 0.5) +
+ geom_smooth(se = F) + 
+ theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) +
+ facet_wrap(~predictors, scales = "free_x")
+```
+
+I plot 2 ser vi att antagandet om linjärt samband mellan log-oddset av responsen och prediktorer tycks vara uppfyllt.
+
+Antagaden för de återstående modellerna är följande;
+
+**Naive Bayes:**\
+- Oberoende mellan förklarande variabler givet klass. Detta gäller datainsamlingen och antas uppfyllt.\
+- Ingen antagande om variablernas fördelning.\
+
+**KNN (K-närmaste grannar):**\
+- Inga antaganden om datans fördelning.\
+- Känslig för skalning av variablerna. Detta genomfördes.\
+- Val av k (antal grannar) och distansmått påverkar modellens prestation.\
+
+
+### Resultat
+
+```{r,kolla.vilka.vars, eval=FALSE, include=FALSE}
+# I inledningen nämndes att en deluppgift går ut på att testa samtliga modeller med samtliga prediktorer och samtliga modeller med prediktorer som är signifikanta på 1% nivån för en vanlig logistisk regression. 
+# I uppgiften står...
+# Definiera “bra” förklaringsvariabler som de förklaringsvariabler som i en logistisk regression är signifikanta på 1%-nivån med alla övriga variabler inkluderade i modellen.
+
+# Jag har ju skapat responsen mha quality så den ryker direkt. 
+summary(glm(cat_excellent ~ . -quality, family = "binomial", data = df_train))
+
+# typ av vin eller färg verkar oväsentligt på 1%-nivån
+summary(glm(cat_excellent ~ . -quality - type, family = "binomial", data = df_train))
+
+# 
+summary(glm(cat_excellent ~ . -quality - type - citric.acid, family = "binomial", data = df_train))
+
+# Följande är signifikanta vid 1% Nivå.
+# "fixed.acidity", "volatile.acidity", "residual.sugar",
+# "chlorides", "free.sulfur.dioxide", "total.sulfur.dioxide",
+# "density", "pH", "sulphates", "alcohol", "cat_excellent
+
+```
+
+
+
+
+```{r, definiera.recept}
+
+# Poängen med att undersöka vilka variabler som skulle med i andra svängen av modellering på förväg är att tidymodels effektiviserar arbetet genom att likrikta pre-processing proceduren. Dvs, jag definierar ett recept som jag sedan kan återanvända för samtliga modeller. Eftersom jag vet vilka variabler jag ska ha med i båda svängar kan jag definiera båda recept på en gång. 
+
+# Tue Feb 13 12:09:04 2024 ------------------------------
+
+# Kommer definiera två recept. Ett för alla variabler med och ett enligt 
+# 
+# "Definiera “bra” förklaringsvariabler som de förklaringsvariabler som i en logistisk regression är signifikanta på 1%-nivån2 med alla övriga variabler inkluderade i modellen."
+
+# Har använt detta tidigare för en annan kurs.
+
+# Define recipe
+gen_rec <- recipe(cat_excellent ~., data = df_train) %>% # formula
+  step_rm(quality) %>% # tar bort quality.
+ step_normalize(all_numeric(), - all_outcomes()) %>% # Att normalisera brukar vara best practice. Särskilt då man har att göra med knn som ju, bygger på avstånd.
+ 
+ step_dummy(type) # NEVER INCLUDE RESPONSE HERE! IT WILL MESS UP THE RECIPE; 
+ 
+# See prepped predictors
+#temp <- gen_rec %>% prep() %>% juice()
+#view(temp)
+
+# Wed Feb 14 12:52:17 2024 ------------------------------
+
+# Post selection recept
+
+# Definiera “bra” förklaringsvariabler som de förklaringsvariabler som i en logistisk regression är signifikanta på 1%-nivån med alla övriga variabler inkluderade i modellen.
+
+
+# Define recipe
+# # Följande är signifikanta vid 1% Nivå.
+# "fixed.acidity", "volatile.acidity", "residual.sugar",
+# "chlorides", "free.sulfur.dioxide", "total.sulfur.dioxide",
+# "density", "pH", "sulphates", "alcohol", "cat_excellent"
+
+post_selection_rec <- recipe(cat_excellent ~ ., data = df_train) %>% # formula
+  step_rm(quality, type, citric.acid) %>% # Tar bort de variabler som inte ska vara med.
+  step_normalize(all_numeric(), - all_outcomes()) # Att normalisera verkar vara best practice. 
+
+# Särskilt då man har att göra med knn som ju, bygger på avstånd.
+```
+
+
+
+
+```{r, modeller}
+
+# Modeller enligt uppgiftsbeskrivning.
+
+# Specificerar att jag vill nyttja en vanlig logistisk regression.
+# och sparar denna inställning i log_mdl.
+log_mdl <- logistic_reg(mode = "classification",
+             engine = "glm")
+
+# Specificerar att jag vill nyttja KNN och sparar denna inställning i knn_mdl
+knn_mdl <- nearest_neighbor(mode = "classification",
+                 engine = "kknn",
+                 neighbors = tune())
+
+# all blw needs discrim.
+
+# discrim contains simple bindings to enable the parsnip package to fit various discriminant analysis models, such as.
+# Se install packages i cellen libraries högst upp!
+
+# Specificerar att jag vill nyttja naive bayes och sparar denna inställning i bay_mdl
+bay_mdl <- naive_Bayes(mode = "classification",
+                       engine = "klaR")
+
+# Specificerar att jag vill nyttja LDA och sparar denna inställning i dis_lin_mdl
+dis_lin_mdl <- discrim_linear(mode = "classification",
+               engine = "MASS")
+
+
+# Specificerar att jag vill nyttja QDA och sparar denna inställning i dis_qua_mdl
+dis_qua_mdl <- discrim_quad(mode = "classification",
+             engine = "MASS")
+
+```
+
+
+
+```{r, grids.skrota.eventuellt.eller.lamna.for.komplett.genomgång.av.tidy.framework}
+
+
+# Stylta upp grids för tuning, antingen definierar man ranges eller så kan man genomföra random search efter bästa parametervärden. I nya Tidy kan man låta tidy definiera en preliminär grid med avstamp i träningsdatat. 
+
+# MÅSTE VARA MELLAN 1-15 ENLIGT UPPGIFT.
+
+knn_grid <- grid_regular(neighbors(range = c(1, 15)), levels = 12)
+
+```
+
+
+
+```{r, kontroller}
+# Modelkontrollen anger vad jag vill logga från träningsproceduren, vanligtvis mha korsvalidering. Prediktioner och workflows brukar vara bra att spara. 
+
+# Tue Feb 13 12:14:23 2024 ------------------------------
+# Återigen gäller detta för alla modeller vilket gör det hela väldigt streamline:at.
+
+mdl_control <- control_grid(save_pred = TRUE, 
+                            save_workflow = TRUE)
+```
+
+
+
+```{r, metrics}
+
+# Detta steg är viktigt, här anger jag vilka metrics jag vill ta med under träningsprocessen, ifall jag vill använda någon av dem för att välja den bästa modellen från träningsprocessen kan jag använda måtten var för sig eller tillsammans. Det är även möjligt att koda egna lossfunktioner och inkludera i metric_set.
+
+# Metrics; 
+mdl_metrics_class <- metric_set(accuracy, roc_auc, sens, spec, mn_log_loss)
+
+
+# Från tidymodels hemsida; 
+# Compared with accuracy(), log loss takes into account the uncertainty in the prediction and gives a more detailed view into the actual performance. For example, given two input probabilities of .6 and .9 where both are classified as predicting a positive value, say, "Yes", the accuracy metric would interpret them as having the same value. If the true output is "Yes", log loss penalizes .6 because it is "less sure" of it's result compared to the probability of .9.
+
+```
+
+
+```{r, workflows}
+
+# workflows
+
+# I workflows summerar vi informationen om inställnignar till ett workflow, tänk såhär; Jag har tidigare öppnat en receptbok och definierat vad jag försöker laga; recept eller formula, med vad; modellval och vad jag måste hålla reda på under tillagningen; metrics, som kan liknas vid tidtagning eller uppmätning  av inner-temperatur. I workflows sammanställer jag detta så att tidy får en övegripande blick över vad som skall ske härnäst. 
+
+
+# Bra att lägga till workflows var för sig, ty om man missat något kommer tidy ge en error här.
+# Missat något; som i; jag kanske missat att ange en dial till en parameter som jag definierat
+# (när jag ropade upp modellen... se chunk 'modeller')
+
+# 
+log_wf <- workflow() %>%
+ add_model(log_mdl) %>%
+ add_recipe(gen_rec)
+
+#
+knn_wf <- workflow() %>%
+ add_model(knn_mdl) %>%
+ add_recipe(gen_rec)
+
+#
+bay_wf <- workflow() %>% 
+ add_model(bay_mdl) %>% 
+ add_recipe(gen_rec)
+
+#
+dis_lin_wf <- workflow() %>%
+ add_model(dis_lin_mdl) %>%
+ add_recipe(gen_rec)
+
+#
+dis_qua_wf <- workflow() %>%
+ add_model(dis_qua_mdl) %>%
+ add_recipe(gen_rec)
+
+
+```
+
+
+
+```{r, echo=FALSE, include=FALSE}
+
+#Viker träningsdatat i 5 folds för sökning av optimala parametrar samt fit_resamples för modeller utan behov av tuning.
+
+# Mon Feb 12 19:47:52 2024 ------------------------------
+
+set.seed(3)
+
+# prepare cross-validation, 6-folds.
+df_folds <- vfold_cv(df_train, v = 5) 
+
+# regarding repeats, if the baseline value of σ is impractically large, 
+# the diminishing returns on replication may still be worth the extra 
+# computational costs. This dataset is small so I might aswell...
+df_folds
+
+```
+
+
+
+```{r, tillpassning}
+
+# Tue Feb 13 12:25:42 2024 ------------------------------
+
+# Tillpassa modeller; söker optimala parametrar för mina modeller mha 5-cv.
+
+# Multiple cores; smoke'em while you've got'em!
+
+# Obs, kopplat mot kriteriet att koden skall vara omdelebart körbar, jag kommer att använda alla processorkärnor JAG har för detta. Om ni bara har en, osannolikt..., innebär det inte att koden inte fungerar, det innebär att den fungerar - marginellt långsammare för denna inlämning...
+
+# Nice to have, ej need to have. 
+
+# OBS OM DU EJ HAR DENNA SPELAR DET INGEN ROLL MODELLERNA TRÄNAS DÅ SEKVENTIELLT VILKET TAR MARGINELLT LÄNGRE TID FÖR DENNA UPPGIFT. KOMMENTER ISF. BORT.
+doParallel::registerDoParallel()
+
+# Fri May 12 15:25:21 2023 ------------------------------
+# Tuning is the process of choosing the most optimal hyperparameters, 
+# the goal being to optimize the predictive performance. 
+# A hyperparameter tuning  grid is a table of values, that are specified. 
+# During the tuning process, a separate model is trained for each combination 
+# of  hyperparameters in the tuning grid. The performance is evaluated, using 
+# cross-validation. The hyperparameter values that result in the model with the
+# best # performance are then chosen as the final hyperparameters.
+
+set.seed(82) # för reproducerbarhet.
+
+# Tue Feb 13 12:30:07 2024 ------------------------------
+# does not support tuning using glm engine... -.-
+
+# FIT RESAMPLES; BOOTSTRAPPAR OCH TILLPASSAR MODELLEN ÖVER TRÄNINGSDATAT. 
+
+# behöver inte tune:a några hyperparams; notera fit_resamples
+
+# 
+tune_log <- fit_resamples(
+ log_wf, # det workflow vi styltade upp tidigare
+ resamples = df_folds, # det vikta träningsdatat.
+ metrics = mdl_metrics_class, # de metrics vi vill fånga upp
+ control = mdl_control) # övriga inställningar, spara prediktioner från träningsprocessen etc.
+
+# Tue Feb 13 12:30:13 2024 ------------------------------
+
+# Jag tune:ar parametern antalet grannar. 
+tune_knn <- tune_grid( 
+ knn_wf, # Övrigt motsvarar processen för första modellen. 
+ resamples = df_folds,
+ grid = knn_grid,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+# behöver inte tune:a denna heller; notera fit_resamples
+tune_bay <- fit_resamples(
+ bay_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+# Thu Feb 15 17:14:49 2024 ------------------------------
+# Thu Feb 15 17:14:50 2024 ------------------------------
+
+# behöver inte tune:a denna heller; notera fit_resamples
+tune_dis_lin <- fit_resamples(
+ dis_lin_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+# behöver inte tune:a denna heller; notera fit_resamples
+tune_dis_qua <- fit_resamples(
+ dis_qua_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+
+# we won't need paralell moving forward.
+doParallel::stopImplicitCluster()
+
+```
+
+I denna rapport har jag valt modeller map roc_auc, dvs area under the reciever operating curve, som anger hur mycket bättre än en slumpmässig gissning våra modeller presterar; i detta scenario. Jag har även fångat upp mean log loss^[Vovk, V. (2015). The Fundamental Nature of the Log Loss Function];\ 
+
+$$L(y, p) = -\frac{1}{N} \sum_{i=1}^{N} [y_i \log(p_i) + (1 - y_i) \log(1 - p_i)]$$ 
+Där $N$ är antalet observationer.
+$y_i$ är den korrekta klassificeringen $i$, där 1 representerar det positiva utfallet(att vinet anses utsökt)och 0 det negativa utfallet(att vinet anses ej utsökt). $p_i$ är den predikterade sannolikheten för att observation $i$ tillhör den positiva klassen.
+
+Mean log loss är ett mått liknande accuracy men som även penaliserar för "osäkerhet" så att en prediktion 60% sannolikhet för en viss klass penaliseras kontra en prediktion med 90% sannolikhet. Den senare bedöms då säkrare och bättre.
+
+I plot 3 kan vi se hur våra valda metrics påverkas av hyperparametern antal grannar, för knn, under träningsprocessen. 
+
+## Plot 3: Uppmätta metrics för värden på hyperparametern neighbors 1-15 för KNN.
+
+```{r, slutkläm, warning=FALSE, message=FALSE, fig.width=10}
+
+
+# Detta steg kan verka lite icke-intuitivt vid första anblick...
+# Vi hämtar en modell från vårt set av modeller tillpassade på boostrappade samples ovan. Därefter slutför vi tillpassningen genom att passa modellen på den första splitten vi gjorde, notera, vi delade ju först i ett träningsdata och testdata, därefter genomförde vi tillpasningen mha korsvalidering på träningsdatat endast, slutligen tillpassar vi nu den bästa modellen på hela träningsdatat och utvärderar mot det faktiska testdatat. 
+# Detta ger våra slutgiltiga train/test metrics, cirkeln är sluten.
+
+# Tue Feb 13 14:05:19 2024 ------------------------------
+
+log_best <- tune_log %>% show_best("roc_auc") %>% # Detta finns beskrivet omedelbart ovanför. 
+ head(1)
+#log_best 
+
+
+# Tue Feb 13 12:50:44 2024 ------------------------------
+
+tune_knn %>% collect_metrics() %>%  # Samla in metrics från träning, tuning, av knn.
+ ggplot(aes(x = neighbors, y = mean, color = .metric)) + # passa till ggplot
+ #geom_line() + 
+ facet_wrap(~.metric) + # skapa grid, eller facetwrap stratifierat på metrics.
+ geom_smooth() + # loess kurva. 
+ labs(x = " neighbors") + theme_bw() # rubriker.
+
+# mellan 10-15 grannar ser ut som en lagom range, med avstamp i tuningen.  
+
+# Samma process som tidigare upprepas.
+knn_best <- tune_knn %>% show_best("roc_auc") %>% head(1)
+#knn_best
+
+# Detta återspeglar den bästa modellen; med bäst parametrar.  
+
+# Tue Feb 13 14:14:56 2024 ------------------------------
+
+
+dis_lin_best <- tune_dis_lin %>% show_best("roc_auc") %>%
+ head(1)
+#dis_lin_best
+
+# Tue Feb 13 14:15:02 2024 ------------------------------
+
+dis_qua_best <- tune_dis_qua %>% show_best("roc_auc") %>%
+ head(1)
+#dis_qua_best
+
+
+bay_best <- tune_bay %>% show_best("roc_auc") %>%
+ head(1)
+
+
+```
+
+För de flesta metrics har antalet grannar nästan ingen påverkan. Man bör välja något antal där mn_log_loss-kurvan planat ut. Inom ramen för 1-15 grannar planar inte våra metrics ut och det är tänkbart att något k större än 15 är det bästa.
+
+
+
+```{r, warning=FALSE, message=FALSE}
+
+# Tue Feb 13 14:12:33 2024 ------------------------------
+# Tue Feb 13 14:12:30 2024 ------------------------------
+
+
+# tillpassar bästa modell på hela träningsdatat. Alltså ej folds. Använder finalized modell i exempelvis
+# production där vi vill prediktera över den dagliga verksamheten. 
+
+# last_fit() emulates the process where, after determining the best model, the final fit on the entire training set is needed and is then evaluated on the test set.
+
+log_fin <- log_wf %>%
+ finalize_workflow(log_best) %>%
+ last_fit(df_split)
+
+# see final metrics, eval on test set
+
+
+# Tue Feb 13 12:53:35 2024 ------------------------------
+
+# tillpassar bästa modell på hela träningsdatat. Alltså ej folds. Använder finalized modell i exempelvis
+# production där vi vill prediktera över den dagliga verksamheten. 
+
+
+knn_fin <- knn_wf %>%
+ finalize_workflow(knn_best) %>%
+ last_fit(df_split)
+
+
+# Tue Feb 13 14:06:04 2024 ------------------------------
+# Denna motsvarar ovan men för nästa modell.
+dis_lin_fin <- dis_lin_wf %>% 
+ finalize_workflow(dis_lin_best) %>% 
+ last_fit(df_split)
+
+# Tue Feb 13 14:17:11 2024 ------------------------------
+
+dis_qua_fin <- dis_qua_wf %>% 
+ finalize_workflow(dis_qua_best) %>% 
+ last_fit(df_split)
+
+# Fri Feb 16 14:16:36 2024 ------------------------------
+
+bay_fin <- bay_wf %>% 
+ finalize_workflow(bay_best) %>% 
+ last_fit(df_split)
+
+```
+
+
+```{r, utvärdera.prestation.från.testdata, warning=FALSE, message=FALSE}
+
+# Utvardera, mha konfusionsmatris, detta är det skattade testfelet, för modeller innehållande alla parametrar. 
+
+
+# Tue Feb 13 14:16:08 2024 ------------------------------
+# Tue Feb 13 14:16:09 2024 ------------------------------
+
+res_log <- log_fin %>% collect_predictions() 
+
+# roc 
+# res_log %>% group_by(id) %>% roc_curve(cat_excellent, `.pred_excellent`) %>% 
+# autoplot()
+
+
+# confusion matrix
+p1 <- autoplot(conf_mat(table(res_log$cat_excellent, res_log$.pred_class)), type = "heatmap") +
+  labs(title = "Logistic regression")
+
+# Tue Feb 13 14:16:21 2024 ------------------------------
+
+res_knn <- knn_fin %>% collect_predictions()
+
+# roc 
+# res_knn %>% group_by(id) %>% roc_curve(cat_excellent, `.pred_excellent`) %>% 
+# autoplot()
+
+# confusion matrix
+p2 <- autoplot(conf_mat(table(res_knn$cat_excellent, res_knn$.pred_class)), type = "heatmap") +
+  labs(subtitle = "KNN")
+
+
+# Tue Feb 13 14:18:23 2024 ------------------------------
+
+res_dis_lin <- dis_lin_fin %>% collect_predictions()
+
+p3 <- autoplot(conf_mat(table(res_dis_lin$cat_excellent, res_dis_lin$.pred_class)), type = "heatmap") +
+  labs(subtitle = "LDA")
+
+# Tue Feb 13 14:20:40 2024 ------------------------------
+
+res_dis_qua <- dis_qua_fin %>% collect_predictions()
+
+p4 <- autoplot(conf_mat(table(res_dis_qua$cat_excellent, res_dis_qua$.pred_class)), type = "heatmap") +
+  labs(subtitle = "QDA")
+
+
+# Fri Feb 16 14:16:58 2024 ------------------------------
+
+res_bay <- bay_fin %>% collect_predictions()
+
+
+p5 <-  autoplot(conf_mat(table(res_bay$cat_excellent, res_bay$.pred_class)), type = "heatmap") +
+  labs(subtitle = "Naive Bayes", caption = "Klassbalans i testdata; 277 excellent. 1023 not excellent")
+
+ 
+#
+stor <- cowplot::plot_grid(p1, p2, p3, p4, p5)
+
+```
+
+
+```{r, post.selection.varianten, warning=FALSE, message=FALSE, iresults='hide'}
+
+# Nu kopierar jag bara ovan procedur workflows och nedåt men anger ett nytt recept i mitt workflow, dvs post selection receptet som jag definierade samtidigt som det stora receptet.
+
+
+# OBS DETTA ÄR ALLTSÅ ALLT JAG GÅTT IGENOM OVAN MEN MED DET NYA RECEPTET SOM ENDA JUSTERING.
+
+# Thu Feb 15 17:31:53 2024 ------------------------------
+
+
+# Bra att lägga till workflows var för sig, ty om man missat något kommer tidy ge en error här.
+# Missat något; som i; jag kanske missat att ange en dial till en parameter som jag definierat
+# (när jag ropade upp modellen... se chunk 'modeller')
+
+# 
+log_wf <- workflow() %>%
+ add_model(log_mdl) %>%
+ add_recipe(post_selection_rec)
+
+#
+knn_wf <- workflow() %>%
+ add_model(knn_mdl) %>%
+ add_recipe(post_selection_rec)
+
+#
+bay_wf <- workflow() %>% 
+ add_model(bay_mdl) %>% 
+ add_recipe(post_selection_rec)
+
+#
+dis_lin_wf <- workflow() %>%
+ add_model(dis_lin_mdl) %>%
+ add_recipe(post_selection_rec)
+
+#
+dis_qua_wf <- workflow() %>%
+ add_model(dis_qua_mdl) %>%
+ add_recipe(post_selection_rec)
+
+# Thu Feb 15 17:28:34 2024 ------------------------------
+
+
+# Tue Feb 13 12:25:42 2024 ------------------------------
+
+# Tillpassa modeller; söker optimala parametrar för mina modeller mha 5-cv.
+
+# Multiple cores; smoke'em while you've got'em!
+
+# Obs, kopplat mot kriteriet att koden skall vara omdelebart körbar, jag kommer att använda alla processorkärnor JAG har för detta. Om ni bara har en, osannolikt..., innebär det inte att koden inte fungerar, det innebär att den fungerar - långsammare...
+
+# Nice to have, ej need to have.
+doParallel::registerDoParallel()
+
+# Fri May 12 15:25:21 2023 ------------------------------
+# Tuning is the process of choosing the most optimal hyperparameters, 
+# the goal being to optimize the predictive performance. 
+# A hyperparameter tuning  grid is a table of values, that are specified. 
+# During the tuning process, a separate model is trained for each combination 
+# of  hyperparameters in the tuning grid. The performance is evaluated, using 
+# cross-validation. The hyperparameter values that result in the model with the
+# best # performance are then chosen as the final hyperparameters.
+
+set.seed(82)
+
+# Tue Feb 13 12:30:07 2024 ------------------------------
+# does not support tuning using glm engine... -.-
+
+# ÖVERVÄG FIT RESAMPLES; SOM BOOTSTRAPPAR OCH TILLPASSAR MODELLEN DÄREFTER TESTAR OCH VÄLJER DEN BÄSTA. 
+
+tune_log <- fit_resamples(
+ log_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+# Tue Feb 13 12:30:13 2024 ------------------------------
+
+#
+tune_knn <- tune_grid(
+ knn_wf,
+ resamples = df_folds,
+ grid = knn_grid,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+#
+tune_bay <- fit_resamples(
+ bay_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+# Thu Feb 15 17:14:49 2024 ------------------------------
+# Thu Feb 15 17:14:50 2024 ------------------------------
+
+# behöver inte tune:a denna heller; notera fit_resamples
+tune_dis_lin <- fit_resamples(
+ dis_lin_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+# behöver inte tune:a denna heller; notera fit_resamples
+tune_dis_qua <- fit_resamples(
+ dis_qua_wf,
+ resamples = df_folds,
+ metrics = mdl_metrics_class,
+ control = mdl_control)
+
+
+# we won't need paralell moving forward.
+doParallel::stopImplicitCluster()
+
+# Fri Feb 16 14:43:05 2024 ------------------------------
+# Fri Feb 16 14:43:06 2024 ------------------------------
+
+# Detta steg kan verka lite icke-intuitivt vid första anblick men är sjukt smidigt och streamline:at. 
+# Vi hämtar en modell från vårt set av modeller tillpassade på boostrappade samples ovan. Därefter slutför vi tillpassningen genom att passa modellen på den första splitten vi gjorde, notera, vi delade ju först i ett träningsdata och testdata, därefter genomförde vi tillpasningen mha korsvalidering på träningsdatat endast, slutligen tillpassar vi nu den bästa modellen på hela träningsdatat och utvärderar mot det faktiska testdatat. 
+# Detta ger våra slutgiltiga train/test metrics, cirkeln är sluten.
+
+# Tue Feb 13 14:05:19 2024 ------------------------------
+
+log_best <- tune_log %>% show_best("roc_auc") %>%
+ head(1)
+#log_best 
+
+
+# Tue Feb 13 12:50:44 2024 ------------------------------
+
+#tune_knn %>% collect_metrics() %>% 
+ #ggplot(aes(x = neighbors, y = mean, color = .metric)) +
+ #geom_line() +
+ #facet_wrap(~.metric) + 
+ #geom_smooth() +
+ #labs(x = " neighbors") + theme_bw()
+
+# mellan 10-15 grannar ser ut som en lagom range, med avstamp i tuningen.  
+
+# 
+knn_best <- tune_knn %>% show_best("roc_auc") %>% head(1)
+#knn_best
+
+# Detta återspeglar den bästa modellen; med bäst parametrar.  
+
+# Tue Feb 13 14:14:56 2024 ------------------------------
+
+
+dis_lin_best <- tune_dis_lin %>% show_best("roc_auc") %>%
+ head(1)
+#dis_lin_best
+
+# Tue Feb 13 14:15:02 2024 ------------------------------
+
+dis_qua_best <- tune_dis_qua %>% show_best("roc_auc") %>%
+ head(1)
+#dis_qua_best
+
+
+bay_best <- tune_bay %>% show_best("roc_auc") %>%
+ head(1)
+
+# Fri Feb 16 14:43:39 2024 ------------------------------
+# Fri Feb 16 14:43:40 2024 ------------------------------
+
+
+# Tue Feb 13 14:12:33 2024 ------------------------------
+# Tue Feb 13 14:12:30 2024 ------------------------------
+
+
+# tillpassar bästa modell på hela träningsdatat. Alltså ej folds. Använder finalized modell i exempelvis
+# production där vi vill prediktera över den dagliga verksamheten. 
+
+# last_fit() emulates the process where, after determining the best model, the final fit on the entire training set is needed and is then evaluated on the test set.
+
+log_fin <- log_wf %>%
+ finalize_workflow(log_best) %>%
+ last_fit(df_split)
+
+# see final metrics, eval on test set
+
+
+# Tue Feb 13 12:53:35 2024 ------------------------------
+
+# tillpassar bästa modell på hela träningsdatat. Alltså ej folds. Använder finalized modell i exempelvis
+# production där vi vill prediktera över den dagliga verksamheten. 
+
+
+knn_fin <- knn_wf %>%
+ finalize_workflow(knn_best) %>%
+ last_fit(df_split)
+
+
+# Tue Feb 13 14:06:04 2024 ------------------------------
+
+dis_lin_fin <- dis_lin_wf %>% 
+ finalize_workflow(dis_lin_best) %>% 
+ last_fit(df_split)
+
+# Tue Feb 13 14:17:11 2024 ------------------------------
+
+dis_qua_fin <- dis_qua_wf %>% 
+ finalize_workflow(dis_qua_best) %>% 
+ last_fit(df_split)
+
+# Fri Feb 16 14:16:36 2024 ------------------------------
+
+bay_fin <- bay_wf %>% 
+ finalize_workflow(bay_best) %>% 
+ last_fit(df_split)
+
+# Fri Feb 16 14:44:25 2024 ------------------------------
+# Fri Feb 16 14:44:26 2024 ------------------------------
+
+
+
+# Utvardera, mha konfusionsmatris, detta är det skattade testfelet, för modeller innehållande alla parametrar. 
+
+
+
+# Tue Feb 13 14:16:08 2024 ------------------------------
+# Tue Feb 13 14:16:09 2024 ------------------------------
+
+# samlar in prediktioner för testdatat.
+res_log <- log_fin %>% collect_predictions() 
+
+# confusion matrix; nyttjar autoplot med conf_mat funktionen för att prediktera predikterade utfall mot 
+# faktiska uppmärkningar och visa dessa i en snygg konfucionsmatris.
+p6 <- autoplot(conf_mat(table(res_log$cat_excellent, res_log$.pred_class)), type = "heatmap") +
+  labs(title = "Logistic regression")
+
+# Tue Feb 13 14:16:21 2024 ------------------------------
+
+res_knn <- knn_fin %>% collect_predictions()
+
+# Thu Feb 29 14:52:14 2024 ------------------------------
+
+# roc 
+# res_knn %>% group_by(id) %>% roc_curve(cat_excellent, `.pred_excellent`) %>% 
+# autoplot()
+
+# Thu Feb 29 14:52:16 2024 ------------------------------
+
+# confusion matrix; samma som ovan.
+p7 <- autoplot(conf_mat(table(res_knn$cat_excellent, res_knn$.pred_class)), type = "heatmap") +
+  labs(subtitle = "K-nearest neigbbors")
+
+
+# Tue Feb 13 14:18:23 2024 ------------------------------
+
+res_dis_lin <- dis_lin_fin %>% collect_predictions()
+
+#
+p8 <- autoplot(conf_mat(table(res_dis_lin$cat_excellent, res_dis_lin$.pred_class)), type = "heatmap") +
+  labs(subtitle = "Linear discriminant")
+
+# Tue Feb 13 14:20:40 2024 ------------------------------
+
+#
+res_dis_qua <- dis_qua_fin %>% collect_predictions()
+#
+p9 <- autoplot(conf_mat(table(res_dis_qua$cat_excellent, res_dis_qua$.pred_class)), type = "heatmap") +
+  labs(subtitle = "Quadratic discriminant")
+
+# Fri Feb 16 14:16:58 2024 ------------------------------
+
+# Denna ger en varning men det är inget problem, den beter sig som förväntat, om man ser till resultatet.
+res_bay <- bay_fin %>% collect_predictions()
+# 
+p10 <-  autoplot(conf_mat(table(res_bay$cat_excellent, res_bay$.pred_class)), type = "heatmap") +
+  labs(subtitle = "Naive Bayes", caption = "Klassbalans i testdata; 277 excellent. 1023 not excellent")
+
+# sammanställer plottar i en och samma grid mha cowplot.
+liten <- cowplot::plot_grid(p6, p7, p8, p9, p10)
+
+
+```
+
+
+Vi jämförde modellerna i konfucionsmatriser, plot 4 och plot 5, där de sanna värdena jämförs mot de predikterade värdena i en matris. Det vill säga, de predikterade värdena jämförs med de sanna värdena i testdatat. Dessutom jämförde vi modellernas accuracy;
+
+$${Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$$
+
+$\text{True Positives (TP)}:\text{Antalet korrekt identifierade 1(excellent).}$ \
+$\text{True Negatives (TN)}:\text{Antalet korrekt identifierade 0(not excellent).}$ \
+$\text{False Positives (FP)}:\text{Antalet felaktigt identifierade excellent, äk typ I fel.}$ \
+$\text{False Negatives (FN)}:\text{Antalet felaktigt identifierade not excellent, äk typ II fel.}$ Detta gjordes i syfte att utvärdera prestandan hos våra 5 modeller. 
+
+```{r, include=FALSE}
+# Nu när proceduren är klar kan vi ta oss friheten att undersöka testdatat för att ta reda på vad en perfekt score innebär. 
+
+table(df_test$cat_excellent)
+```
+
+En modell som predikterar perfekt, med accuracy: 1.0, skulle prediktera 277 excellent resp. 1023 not excellent. I plot 4 kan vi se resultatet för våra modeller som innehöll samtliga prediktorer, FP motsvaras av siffran i 1:a kvadranten, TP i 2:a kvadranten, FN i tredje kvadranten samt TN i 4:e kvadranten. I plot 5 kan vi se resultatet för de modeller som endast innehöll prediktorer signifikanta vid 1%-nivå, som var en deluppgift.
+
+
+## Plot 4: Skattade testfel för modellerna med alla variabler inkluderade
+
+```{r, fig.width=10}
+
+# Skattat testfel för stor modell
+stor 
+```
+
+
+Tabell 1 innehåller test-accuracy för de modeller som hade alla variabler inkluderade, vi noterar att knn har högst accuracy.
+
+
+## Tabell 1: Accuracy för modeller med alla variabler inkluderade.
+
+```{r}
+
+# Accuracy om det behövs
+gt::gt(data.frame(
+# Logr accuracy
+"Logistic Regression" = (70 + 980) / (70 + 980 + 207 + 43),
+
+# knn -"-
+"Knn" = (149 + 947) / (149 + 947 + 128 + 76),
+
+# lda
+"LDA" = (86 + 964) / (86 + 963 + 191 + 60),
+
+# qda
+"QDA" = (187 + 802) / (187 + 802 + 90 + 221),
+
+# naive bayes
+"Naive Bayes" = (149 + 854) / (149 + 854 + 128 + 169)
+))
+
+```
+
+
+
+## Plot 5: Skattade testfel för modellerna med endast variabler signifikanta vid 1%-nivån inkluderade
+
+```{r, fig.width=10}
+
+# Skattat testfel för liten modell
+liten
+```
+
+
+Tabell 2 innehåller accuracy för de modeller som innehöll endast signfikanta variabler, vid 1%-nivån. Knn är fortfarande den modell som levererar bäst prestanda sett till test-accuracy. Vi noterar marginella förändringar relativt de modeller som inkuderar alla variabler.
+
+
+## Tabell 2: Accuracy för modeller med endast variabler signifikanta vid 1%-nivån inkluderade
+
+```{r}
+# Accuracy; om det behövs...
+gt::gt(data.frame(
+# logr accuracy
+"Logistic regression" = (69 + 980) / (69 + 980 + 43 +208),
+
+# knn -"-
+"Knn" = (140 + 958) / (140 + 958 + 65 + 137),
+
+# lda
+"LDA" = (86 + 961) / (86 + 961 + 191 + 62),
+
+#qda 
+"QDA" = (166 + 843) / (166 + 843 + 180 + 111),
+
+# naive bayes
+"Naive Bayes" = (147 + 868) / (147 + 130 + 155 + 868)
+))
+
+```
+
+
+
+### Diskussion
+
+När vi genomförde kontroll av antaganden för modellerna kunde man dra slutsatsen att QDA bör prestera bättre än LDA, eftersom vi vid ett Boxm test förkastade nollhypotesen att prediktorerna hade lika kovariansmatriser stratifierat på responsvariabeln. Man kunde tänka sig att logistisk regression skulle prestera åtminstone bättre än LDA med samma argument som ovan. Vad gällde logistisk regression mot QDA var svårt att avgöra på förhand. Förvisso hade vi ett, så gott som, linjärt samband mellan log odds och prediktorer, men multikolinjäriteten kontrollerades inte och kan därmed ställa till bekymmer. KNN och naive bayes förlitar sig inte på några antaganden förutom oberoende observationer vilket har att göra med insamlingen och får antas vara uppfyllt för alla modeller. Därmed bör de två sistnämnda ge en bättre och mer robust prestanda relativt övriga modeller.
+
+När vi jämför konfuscionsmatriserna för modellerna, i plot 4 och plot 5, ser vi att de modeller vars antaganden varit ouppfyllda presterar sämre relativt övriga. Vi kan konstatera att de modeller som förlitar sig på färst antaganden levererar bäst prestation och bör i teori vara mer robusta än de modeller vars antaganden ej är uppfyllda, även under likartad prestation - allt annat lika gällande antaganden. Knn påverkas allra minst av att variera antalet prediktorer och är tillika den modell som förlitar sig på färst antaganden - knn, presterar bäst, sett till accuracy, för både den lilla och stora modellen. 
+
+Skillnaden mellan de modeller som har samtliga variabler och modeller med signifikanta variabler vid 1%-nivån är marginell. När vi jämför accuracy i tabell 1, för modeller med samtliga prediktorer, och tabell 2, modeller med signifikanta variabler vid 1%-nivån se vi att de modeller som har bara signifikanta variabler presterar bättre än de förstnämnda. Detta är möjligtvis, då vi jämför modellernas test-accuracy, eftersom de modeller som innehöll alla variabler bedömt överanpassar sig till träningsdatat relativt mer än de modeller som bara innehöll signifikanta variabler. 
+
+I allmänhet är den bästa modellen den enklaste modellen och det finns oftast ett värde i dimensionsreducering, med öronmärkningen att detta i vissa fall innebär en avvägning mellan information och dimensioner - det vill säga vi kan behöva ge upp viss information om vi prioriterar att reducera dimensioner. I detta fall hade jag föredragit att välja en modell med färre parametrar även om skillnaden i accuracy är väldigt liten; desto mindre rörliga delar, desto mindre som kan gå fel. 
+
+För att summera;
+
+Knn är den föredragna modellen både då alla variabler inkluderats respektive endast de signifikanta, detta taktar mot det vi såg vid kontroll av antaganden; det vill säga att de modeller som förlitar sig på antaganden ej kunde anta 1 eller flera av dessa. De modeller som innehöll endast signifikanta variabler vid 1%-nivån presterade bättre relativt de modeller som innehöll alla variabler; detta kan bero på att de sistnämnda överanpassar sig till träningsdatat och nyttjar irrelevant information(som inte tillhör de essentiella delarna av den underliggande datagenererande processen). 

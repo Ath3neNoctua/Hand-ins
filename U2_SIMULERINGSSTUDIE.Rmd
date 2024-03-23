@@ -1,0 +1,451 @@
+---
+title: "Inlämning 2"
+author: "Söderström J."
+date: "2024-02-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r}
+rm(list = ls())
+```
+
+
+```{r, libraries, include=FALSE}
+
+# Detta uppfyller koden skall vara omedelbart körbar.
+# install.packages("MASS", "glmnet", "pls", "leaps", 
+                 "gt", "gtExtras", "dplyr")
+
+# nödvändiga paket.
+library(MASS) # För mvrnorm-funktionen
+library(glmnet) # För LASSO
+library(pls) # För PCR
+library(leaps) # För stegvis selektion
+library(gt) # för tabeller
+library(gtExtras) # fotnoter och titlar
+library(dplyr) # pipe operator för gt
+
+```
+
+
+
+### Introduktion
+
+I det statistiska analysarbetet söker vi de essentiella delarna av en underliggande datagenererande process; det som, slarvigt, kallas signal. Därmed är det viktigt att förstå hur väl olika modeller fångar upp signalen i ett datamaterial. I allmänhet innehåller inte ett datamaterial 100% signal utan snarare en stor andel brus; egenskaper som exempelvis korrelation mellan förklaringsvariabler är ett exempel på brus, spurious korrelation är ett annat.     
+
+Denna simuleringsstudie syftar till att utforska och jämföra prestandan hos fem olika regressionsmodeller – OLS, forward selection, LASSO, samt PCR med optimalt antal- repspektive 2 principalkomponenter – genom att använda simulerade datamängder. Vi fokuserar särskilt på att utvärdera modellernas prediktionsförmåga (mätt med prediktions-MSE) och förmåga att locka fram signalen i vårt datamaterial. Vi jämför sedan forward selection och lasso-regression med avseende på förmåga att identifiera de korrekta variablera; de essentiella delarna av den underliggande datagenererande processen.
+
+
+### Metod
+
+**Data:** Datamaterialet består av 500 simulerade datamängder, bestående av 100 observationer om 40 prediktorer. Därefter har en responsvariabel konstruerats av de första 20 prediktorerna. Det vill säga, de variabler som har ett linjärt samband till responsvariaben är de första 20, av 40, prediktorerna. Värt att nämna är att prediktorerna 10 till 30 har en kovarians sinsemellan på 0.8.  
+
+Parametrarna definieras:
+
+- **n(obs) = 100**: Det totala antalet observationer i varje simulerad datamängd.
+- **n(x) = 40**: Antal prediktorer.
+- **ρ = 0.8**: Kovarians.
+
+En kovariansmatris, **C**, med dimensionerna **nx × nx**, skapas för variansen och kovariansen mellan prediktorerna:
+
+Alla värden i matrisen sätts initialt till noll - alltså, inget beroende. Egenskaper 10 till 30 (**C[10:30, 10:30]**) sätts till **ρ**, vilket innebär en kovarians på 0.8 sinsemellan. Diagonalelementen i **C** tilldelas värdet 1, så att varje egenskap har varians 1.
+
+Med hjälp av mvnormfunktionen från MASS och kovariansmatrisen **C**, genererar vi ny matris **X** som innehåller **n(obs)** observationer av **n(x)** normalfördelade prediktorer. Vi genererar responsvariabeln **y**, genom att summera de första 20 prediktorerna i **X** för varje rad plus en felterm **ε**, där **ε ∼ N(0,1)**.
+
+Vi upprepar ovan 500 gånger, vilket resulterar i 500 datamänger, var och en bestående av 100 observationer med 40 prediktorer, där 10 till 30 är beroende och ett linjärt samband finns mellan responsvariabeln och 10 till 20, samt en felterm.
+
+
+**Prediktions-MSE mellan modellerna:**
+
+Prestandan av de olika modellerna bedöms med hjälp av en loss-funktion; MSE, som beräknas enligt följande:
+
+**Prediktions-MSE = Var(ε) + E[(f(x) - $\hat f$(x))^2]**
+
+Där:
+
+- **Var(ε)** representerar variansen av feltermen, som är känd att vara 1.
+- **E[(f(x) - $\hat f$(x))^2]** betecknar de kvadrerade skillnaderna mellan den sanna funktionen **f(x)** och dess skattningar **$\hat f$(x)**.
+
+
+**Modeller och specifikationer:**
+
+**OLS:** Den traditionella linjära regressionsmodellen tillämpas på alla 40 variabler, vilket ger en baseline för denna studie. OLS är effektiv för enkla till måttligt komplexa datamängder där relationen mellan variablerna är ungefär linjär. 
+
+**Stepwise selection:** Jag avser använda forward selection, där vi använder BIC(Bayes information criterion) för att identifiera den mest effektiva modellen bland möjliga kombinationer av förklaringsvariabler. Användbart för att reducera dimensionerna genom att endast inkludera relevanta prediktorer. I teori ska denna metod fungera bättre än Lasso endast då det linjära sambandet mellan prediktorer som exkluderas och responsen är exakt 0.
+
+**LASSO:** Genom att justera straffparametern λ med korsvalidering, optimeras LASSO-modellen för balans mellan komplexitet och prediktionsförmåga. Lasso kan effektivt reducera komplexiteten genom att låta icke-signifikanta prediktorer krympa till 0. Detta är särskilt användbart i situationer med högdimensionella data och när korrelationen mellan prediktorer och respons inte är exakt noll.  
+
+**PCR (Optimalt antal komponenter):** PCR-modellen väljer ett optimalt antal principalkomponenter baserat på korsvalidering. Genom att välja ett optimalt antal komponenter bör PCR effektivt hantera multikolinjäritet och "the curse of dimensionality"; vilket syftar till att maximera modellens förklaringsgrad utan att överanpassa!
+
+**PCR (2 komponenter):** Detta är samma modell som omedelbart ovan men använder endast två principalkomponenter; för att undersöka effekten av stark dimensionreducering! PCR kan ge robusta modeller, särskilt i vid multikolinjäritet. Valet av antal komponenter är dock avgörande; för många kan leda till överanpassning, medan för få kan missa viktiga relationer i datan.
+
+
+```{r, generera.data}
+
+# Fri Feb 23 11:55:26 2024 ------------------------------
+
+# Parametrar, enligt uppgiftsbeskrivning.
+
+ant.obs <- 100 # Antal observationer
+ant.x <- 40 # Antal förklaringsvariabler
+rho <- 0.8 # Kovarians
+ant.sim <- 500 # Antal simuleringar
+
+# Fri Feb 23 11:55:28 2024 ------------------------------
+
+# Skapa en kovariansmatris, enligt uppgiftsbeskrivning.
+Sigma <- matrix(0, nrow = ant.x, ncol = ant.x) #
+Sigma[10:30, 10:30] <- rho
+diag(Sigma) <- 1
+
+# Fri Feb 23 11:55:30 2024 ------------------------------
+
+# Funktion för att generera EN(1) datamängd!
+# Kommer använda i replicate.
+
+generera_data <- function() {
+ X <- mvrnorm(ant.obs, rep(0, ant.x), Sigma) # prediktorer
+ Eps <- rnorm(ant.obs) # Epsilåån
+ y <- rowSums(X[, 1:20]) + Eps # Respons
+ fx <- rowSums(X[, 1:20]) # sann modell, enligt tips 4 i uppgiften.
+ data.frame(X = X, y = y, fx = fx) # Spara i dataframe.
+}
+
+# Seed för reproducerbarhet.
+set.seed(10)
+
+# Simulera.
+simulerade_data <- replicate(ant.sim, generera_data(), simplify = F)
+
+# Behöver inte dessa mer.
+rm(Sigma, ant.obs, ant.sim, ant.x, rho, generera_data)
+
+
+# simulerade_data;; en lista med 500 element, där varje element är en lista med X och y för EN körning (simulering).
+
+```
+
+
+```{r, ols}
+
+# Kommer göra allt på samma sätt; dvs skriva en funktion som tar fram det jag söker för en datamängd; därefter nyttja sapply för att iterera över de 500 datamängderna sparade i en lista.
+
+# Börjar med att skriva en funktion för att ansätta en OLS. 
+ols_mse <- function(data) {
+ # Ansätt modell, notera att jag lyfter ut fx; där jag sparat f(x) för varje enskild datamängd.
+ model <- lm(y ~ . -fx, data = data)
+
+ # Spara mse; gjorde först misstaget att använda Y för att ta fram MSE.
+ # mse <- mean(data$fx - predict(model)^2) + 1
+ 
+ # Spara rätt MSE! 
+  mse <- mean((data$fx - predict(model))^2) + 1
+ 
+ return(mse)}
+
+```
+
+
+
+
+```{r, lasso}
+
+lasso_cv_mse_and_correct_vars <- function(data) {
+ 
+  # Förbered data; notera att jag exkluderar y och f(x)
+  x_matrix <- as.matrix(data[, -c(41, 42)])
+  # Spara y i egen vektor
+  y_vector <- data$y
+  
+  # Söker bästa lambda; det lambda som minimerar MSE, med korsvalidering.
+  cv_model <- cv.glmnet(x_matrix, y_vector, alpha = 1)
+  
+  # Sparar bästa lambda
+  best_lambda <- cv_model$lambda.min
+  
+  # Ansätt modell med bässta lambda
+  lasso_model <- glmnet(x_matrix, y_vector, alpha = 1, lambda = best_lambda)
+  
+  # Beräkna MSE 
+  preds <- predict(lasso_model, newx = x_matrix, s = best_lambda)
+  #
+  mse <- mean((data$fx - preds)^2) + 1
+  
+  # Identifiera valda variabler (exkludera intercept)
+  selected_vars_coef <- coef(lasso_model, s = best_lambda)
+  
+  # Index för icke-noll koefficienter
+  selected_vars <- which(selected_vars_coef != 0) 
+  
+  # Matcha valda variabler med 
+  # De korrekta (x.1 till x.20)
+  correct_var_indices <- 1:20 
+  
+  # De inkorrekta
+  incorrect_var_indices <- 21:40
+
+  # Kontrollera vilka vars som matchar respektive vektor ovan.
+  num_correct_vars <- sum(selected_vars %in% correct_var_indices)
+  #
+  num_incorrect_vars <- sum(selected_vars %in% incorrect_var_indices)
+  
+  # Returnera både MSE och antalet korrekta variabler
+  return(list(mse = mse, good_vars = num_correct_vars, bad_vars = num_incorrect_vars))}
+```
+
+
+
+
+```{r, forward.selection}
+# Thu Feb 22 16:07:47 2024 ------------------------------
+# Thu Feb 22 16:07:48 2024 ------------------------------
+
+# Funktion för att utföra forward selection och beräkna MSE
+calc_stepwise_mse_and_correct_vars <- function(data) {
+  # Modellval med regsubsets
+  modell <- regsubsets(y ~ . -fx, data = data, method = "forward", nvmax = 40, really.big = TRUE)
+  
+  # Välj bästa modell baserat på BIC
+  modell_summary <- summary(modell)
+  best_model <- which.min(modell_summary$bic)
+  
+  # Extrahera namnen på de valda variablerna för bästa modellen
+  best_vars <- names(coef(modell, id = best_model))
+  
+  # Skapa modellformel för bästa modellen
+  formula_best <- as.formula(paste("y ~", paste(best_vars[-1], collapse = " + ")))
+  
+  # Beräkna MSE för bästa modellen
+  fit <- lm(formula_best, data)
+  predictions <- predict(fit, data)
+  mse <- mean((data$fx - predictions)^2) + 1
+  
+  # Identifiera korrekta variabler som ingår i den bästa modellen
+  # Vektor med korrekta vars, assimilerat till format...
+  correct_var_names <- paste0("X.", 1:20) 
+  # inkorrekta -"-
+  incorrect_var_names <- paste0("X.", 21:40)
+  
+  # Jämför; Sök i resp. vektor efter hur många som motsvarar resp. vektor ovan 
+  # av de utvalda variablerna
+  num_correct_vars <- sum(best_vars %in% correct_var_names)
+  num_incorrect_vars <- sum(best_vars %in% incorrect_var_names)
+  
+  
+  # Returnera både MSE och antalet korrekta variabler
+  return(list(mse = mse, good_vars = num_correct_vars, bad_vars = num_incorrect_vars))}
+
+```
+
+
+
+```{r, pcr.opti}
+# Thu Feb 22 16:26:36 2024 ------------------------------
+# Thu Feb 22 17:03:07 2024 ------------------------------
+
+# Denna funkar
+calc_pcr_mse <- function(data) {
+  
+  # Förbereder data;  
+  # Notera att jag lyfter ut respons och f(x)
+  x_matrix <- as.matrix(data[, -c(41, 42)])
+  # Skala data, Bygger på pca, vilken nyttjar euklidiskt avstånd. Därmed bör man skala så att de
+  # komponenter som svarar för störst andel variation inte bara är de variabler som har störst
+  # varians. 
+  x_scaled <- scale(x_matrix)
+  
+  
+  # Sparar responsen i vektor.
+  y_vector <- data$y
+  
+  #
+  set.seed(777) # För reproducerbarhet
+  
+  # Ansätter modell. 
+  pcr_model <- pcr(y ~ x_scaled, data = data, scale = T, validation = "CV")
+
+  # Använd RMSEP för att spara ned korsvalideringsfel och hitta det optimala antalet komponenter
+  cv_errors <- RMSEP(pcr_model)$val[1,,]
+  #
+  optimal_components <- which.min(cv_errors) - 1  # Justera för att exkludera modellen utan komponenter
+  
+  # Beräkna prediktioner med det optimala antalet komponenter
+  preds <- predict(pcr_model, ncomp = optimal_components)
+  
+  # Beräkna MSE
+  mse <- mean((data$fx - preds) ^ 2) + 1
+  
+  return(mse)}
+
+```
+
+
+
+
+```{r, pcr.m.2}
+ # Fri Feb 23 17:00:26 2024 ------------------------------
+ # Thu Feb 22 16:08:07 2024 ------------------------------
+ pcr_m2_mse <- function(data) {
+ 
+ # Förbereder data,
+ # Notera exkludering av respons och f(x), för responsmatrisen. 
+ x_matrix <- as.matrix(data[, -c(41, 42)])
+ x_scaled <- scale(x_matrix)
+ 
+ # Vektor för respons.
+ y_vector <- data$y
+ 
+ # Ansätter modell;  
+ pcr_model <- pcr(y ~ x_scaled, data = data, scale = TRUE, ncomp = 2)
+ preds <- predict(pcr_model, ncomp = 2, newdata = data)
+ 
+ 
+ # Beräkna mse
+ mse <- mean((data$fx - preds)^2) + 1
+ 
+ return(mse)}
+
+```
+
+
+
+```{r, }
+
+# ols 
+ols_results <- sapply(simulerade_data, ols_mse)
+#mean(ols_results)
+
+# Stegvis selektion
+stepwise_results <- sapply(simulerade_data, calc_stepwise_mse_and_correct_vars)
+#mean(stepwise_results)
+
+# Thu Feb 22 17:05:24 2024 ------------------------------
+
+# lasso
+lasso_results <- sapply(simulerade_data, lasso_cv_mse_and_correct_vars)
+#mean(lasso_results)
+
+# Thu Feb 22 17:05:26 2024 ------------------------------
+
+# PCR med korsvalidering för att välja M
+pcr_cv_results <- sapply(simulerade_data, calc_pcr_mse)
+#mean(pcr_cv_results)
+
+# Fri Feb 23 18:40:07 2024 ------------------------------
+
+# PCR med M = 2
+pcr_m2_results <- sapply(simulerade_data, pcr_m2_mse)
+#mean(pcr_m2_results)
+
+```
+
+
+```{r}
+# Här sparar jag helt enkelt resultaten i en och samma data frame. För att underlätta presentation.
+MSE <- data.frame(ols = mean(ols_results), frwd = mean(as.numeric(stepwise_results[1,])), 
+                  lasso = mean(as.numeric(lasso_results[1,])), pcr_opti = mean(pcr_cv_results), 
+                  pcr_2 = mean(pcr_m2_results))
+```
+
+
+### Resultat
+
+I denna sektion presenteras de genomsnittliga prediktions-MSE:erna för varje modell baserat på de 500 simulerade träningsdatamängderna. Dessutom analyseras hur effektivt varje metod utför variabelselektion, i termer av att inkludera relevanta variabler och utesluta de som inte bidrar till modellens prediktionsförmåga.
+
+När vi jämför prediktions-MSE för de olika regressionsmodellerna i tabell 1 får vi följande resultat:
+
+
+```{r}
+
+# Sätter lämpliga kolumnnamn.
+colnames(MSE) <- c("OLS-regression", "Forward Selection", "Lasso-regression", 
+                   "pcr(optimalt antal komp)", "pcr(Antal komp = 2)")
+
+# Avrundar onödiga decimaler.
+MSE <- round(MSE, digits = 3) 
+
+# Framställer tabell mha gt
+gt::gt(MSE)%>% 
+tab_header(title = md("***Tabell 1: Prediktions-MSE***")) %>%
+    tab_footnote(footnote = md("Genomsnitt över 500 datamängder"))
+
+```
+
+
+- **OLS:** MSE är 1.406. OLS har därmed viss förmåga att fånga upp signalen i datamaterialet. För detta användningsområde är det lämpligt att använda OLS som baseline eftersom det är den parametriska modell som, eftersom vi känner till hur datamaterialet är skapat, verkar vara den första och mest rimliga kandidaten. (OLS tar inte hand om överanpassning eller korrelation mellan variabler, vilket kan vara en anledning till att den inte presterar bäst.)
+
+- **Forward Selection:** Med ett MSE på 1.302 är detta den modell som presterar bäst. Det tyder på att metoden är bra på att välja ut de variabler som bidrar mest till att förutsäga responsvariabeln utan att lägga till onödig komplexitet. Nämnas bör att vi har en situation där de flesta variabler som inte tillhör det sanna sambandet, har 0 korrelation med responsen; dvs, i de flesta fall presterar lasso bättre men för detta specialfall lyckas stepwise trumfa.
+
+- **LASSO:** LASSO får ett MSE på 1.325, vilket är nära Forward Selection. Detta resultat visar att LASSO är effektiv för att både välja ut viktiga variabler och undvika överanpassning genom att krympa vissa koefficienter till noll.
+
+- **PCR (Optimalt antal komponenter):** MSE för denna modell är 1.426, vilket är lite sämre än för OLS. Detta kan bero på att även om PCR reducerar problem med korrelation mellan variabler, kan valet av antal komponenter leda till att viktig information går förlorad.
+
+- **PCR (2 komponenter):** Denna modell har ett MSE på 10.15, vilket är betydligt högre än de andra modellerna. Detta visar att att använda endast två komponenter bortser ifrån för mycket information, vilket resulterar i dåliga prediktioner.
+
+Sammanfattningsvis, i tabell 1 kan vi se att både Forward Selection och LASSO presterar bra medan PCR med endast två komponenter presterar sämst. Dessa resultat understryker vikten av att välja rätt metod för att balansera mellan viktiga variabler och onödig komplexitet. Eftersom vi nyttjat OLS som baseline är det rimligt att behålla LASSO och stepwise som kandidater och förpassa övriga till avbytarbänken.
+
+
+En deluppgift var att undersöka forward selection mot LASSO med avseende på hur bra dessa fångar upp de essentiella delarna av det underliggande sambandet:
+
+
+```{r}
+# Hämta relevant ur resultatvektor
+# Samt framställ tabell; lika som innan.
+gt::gt(data.frame("LASSO korrekta" = mean(as.numeric(lasso_results[2,])), 
+  "LASSO Inkorrekta" = mean(as.numeric(lasso_results[3,])), 
+  "Stepwise.korrekta" = mean(as.numeric(stepwise_results[2,])), 
+  "Stepwise.inkorrekta" = mean(as.numeric(stepwise_results[3,])))) %>% 
+tab_header(
+        title = md("***Tabell 2: Antal korrekt resp. inkorrekt identifierade prediktorer***")) %>%
+    tab_footnote(footnote = md("Genomsnitt över 500 datamängder"))
+
+# Mon Feb 26 15:32:29 2024 ------------------------------
+
+# Mon Feb 26 17:33:06 2024 ------------------------------
+
+
+```
+
+
+Baserat på resultaten kan vi dra följande slutsatser:
+
+**Forward Selection och LASSO är de mest effektiva metoderna** Deras låga MSE, tabell 1, visar att de lyckas välja relevanta variabler samtidigt som de undviker överanpassning, bättre än OLS. Detta gör dem till lämpliga val för situationer då vi har relativt snälla och normalfördelade tvärsnittsdata. När vi genomför de två modellern i tabell 2 ser vi att forward selection med BIC som urvalskriterium inkluderar färre irrelevanta prediktorer än LASSO. Det är ett känt resultat att LASSO tenderar att inkludera irrelevanta variabler vid tillfällen då det råder multikolinjäritet mellan prediktorer. Det är också känt att stepwise fungerar bättre än LASSO, ENDAST när korrelationen mellan irrelavanta prediktorer ohc responsen är EXAKT 0; vilket bör vara ett specialfall...\n
+
+**OLS presterar hyfsat men inte optimalt**, vilket kan bero på svårigheten att hantera multikolinjäritet och överanpassning. Även om OLS är enkel att implementera och förstå, kan dess användbarhet vara begränsad i komplexa datamängder med många förklaringsvariabler, interkationer, och starka korrelationer mellan dessa.\n
+
+**PCR med ett optimalt antal komponenter** kunde haft viss potential med tanke på dess förmåga att minska problem relaterade till multikolinjäritet, men den når inte samma prestandanivå som Forward Selection eller LASSO. Detta kan delvis bero på svårigheten att välja ett lämpligt antal komponenter som fångar upp tillräckligt med information utan att introducera onödig varians. Alternativt, avvägningen i sig, när man väljer PCR uttrycker man, ju, att man är beredd att ge upp delar av informationen i syfte att minska komplexiteten. \n
+
+**Användningen av PCR med endast två komponenter** resulterar i betydligt sämre förutsägelser, vilket tyder på att en så kraftig dimensionreduktion tar bort för mycket viktig information. Detta understryker riskerna med att överförenkla modellen i försöken att hantera multicollinearitet och varians.\n
+
+Utifrån dessa slutsatser rekommenderas att använda Forward Selection eller LASSO i liknande simuleringsstudier eller verkliga scenarier där det är viktigt att hitta en balans mellan viktiga förklaringsvariabler och att undvika överanpassning. OLS kan vara användbart för enklare analys eller som en baseline, medan PCR bör användas med försiktighet, speciellt när det gäller valet av antal principalkomponenter; har förmodligen en större poäng när vi har att göra med verkligt högdimensionella datamaterial.
+
+
+
+### Diskussion
+
+I simuleringsstudien där vi jämförde olika regressionsmodellers förmåga att förutsäga responsvariabeln baserat på simulerade datamängder, använde vi en fast uppsättning förutsättningar. Att variera dessa förutsättningar kan ge ytterligare information om modellernas robusthet och anpassningsförmåga under olika omständigheter. Här diskuterar vi några potentiella förändringar och varför de skulle vara intressanta:
+
+**Stickprovsstorlek**
+
+Att variera stickprovsstorleken från mycket små till mycket stora datamängder skulle ge värdefull information om modellernas skalbarhet och effektivitet. För små datamängder är risken för överanpassning högre, och det vore intressant att se vilken modell som hanterar detta bäst. Å andra sidan kan stora datamängder introducera komplexitet och beräkningsutmaningar, där effektiviteten av dimensionreduktion som PCR kan bli mer uppenbar.
+
+**Dimensionalitet**
+
+Att öka antalet förklaringsvariabler skulle testa modellernas förmåga att hantera högdimensionella data (inklusive multikolinjäritet och the curse of dimensionality). Det skulle vara särskilt intressant att jämföra LASSO och stegvisa metoder i detta sammanhang, eftersom de båda använder distinkt olika strategier för variabelselektion.
+
+**Korrelationsstruktur**
+
+Ändra beroendestrukturen mellan prediktorerna, till exempel genom att introducera olika grader av kovarians, skulle ge insikter i hur väl varje modell kan hantera detta. Detta kan också inkludera att experimentera med olika fördelning för feltermerna, här har vi använt oss av normalfördelade feltermer.
+
+**Signal vs. brus**
+
+Att manipulera signal to noise-ratio:n i de simulerade datamängderna skulle testa modellernas robusthet mot brus. Högre brusnivåer skulle göra det svårare för modellerna att identifiera de verkliga sambanden mellan förklaringsvariablerna och responsvariabeln, vilket är en vanlig utmaning i verkliga datamängder.
+
+**Varför intressanta?**
+
+Dessa förändringar är intressanta att utforska eftersom de speglar verkliga scenarier och utmaningar som forskare och dataanalytiker ofta stöter på. Genom att testa modellernas prestanda under ett brett spektrum av förhållanden kan vi få en bättre förståelse för deras styrkor och begränsningar. Detta kan leda till mer informerade val av modelleringstekniker(!) i framtida, verkliga, studier och tillämpningar, särskilt i komplexa situationer där datans egenskaper inte alltid är idealiska eller väldefinierade.
